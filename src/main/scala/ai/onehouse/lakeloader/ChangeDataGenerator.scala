@@ -320,7 +320,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
 
     var rankedDF = spark.sql(
       """
-        | SELECT *, row_number(key) OVER (PARTITION BY key ORDER BY round DESC) as key_rank
+        | SELECT *, rank(key) OVER (PARTITION BY key ORDER BY round DESC) as key_rank
         | FROM source_df_partitions
         |""".stripMargin
     )
