@@ -28,7 +28,7 @@ generate datasets that can produce **FACT** tables (Zipfian pattern for updates)
 
 **NOTE** Instructions provided are for Spark-Shell, but Spark-Submit can be used with the application class name ChangeDataGenerator. 
 #### Fact table arguments
-The following generates dateset for a 1TB **FACT** table with 
+The following generates dataset for a 1TB **FACT** table with:
 - 365 partitions based on date
 - 1B records
 - 40 column schema
