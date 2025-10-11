@@ -320,7 +320,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
 
     var rankedDF = spark.sql(
       """
-        | SELECT *, rank(key) OVER (PARTITION BY key ORDER BY round DESC) as key_rank
+        | SELECT *, row_number(key) OVER (PARTITION BY key ORDER BY round DESC) as key_rank
         | FROM source_df_partitions
         |""".stripMargin
     )
@@ -330,7 +330,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     println(s"Picking random updates for round: # $currentRound: from total records = $totalRecords")
 
     val samplingRatio = Math.min(1.0, numUpdateRecords.toDouble / totalRecords.toDouble)
-    val finalDF = sourceDf
+    val finalDF = rankedDF
       // NOTE: We should not be filtering out records as it will reduce number of updated records we sample
       .sample(samplingRatio)
     finalDF
