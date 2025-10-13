@@ -424,7 +424,8 @@ case class LoadConfig(numberOfRounds: Int = 10,
                       operationType: String = "upsert",
                       options: Map[String, String] = Map.empty,
                       nonPartitioned: Boolean = false,
-                      experimentId: String = StringUtils.generateRandomString(10)
+                      experimentId: String = StringUtils.generateRandomString(10),
+                      startRound: Int = 0
                      )
 
 object IncrementalLoader {
@@ -490,6 +491,10 @@ object IncrementalLoader {
       opt[String]('e', "experiment-id")
         .action((x, c) => c.copy(experimentId = x))
         .text("Experiment ID")
+
+      opt[Int]("start-round")
+        .action((x, c) => c.copy(startRound = x))
+        .text("Start round for incremental loading. Default 0.")
     }
 
     parser.parse(args, LoadConfig()) match {
@@ -507,7 +512,8 @@ object IncrementalLoader {
           operation = OperationType.fromString(config.operationType),
           opts = config.options,
           nonPartitioned = config.nonPartitioned,
-          experimentId = config.experimentId
+          experimentId = config.experimentId,
+          startRound = config.startRound
         )
         spark.stop()
       case None =>
