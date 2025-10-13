@@ -31,7 +31,10 @@ import io.delta.tables.DeltaTable
 import java.io.Serializable
 import scala.collection.mutable.ListBuffer
 
-class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10) extends Serializable {
+class IncrementalLoader(val spark: SparkSession,
+                        val numRounds: Int = 10,
+                        val catalogName: Option[String] = None,
+                        val databaseName: String = "default") extends Serializable {
 
   private def tryCreateTable(schema: StructType,
                              outputPath: String,
@@ -45,7 +48,12 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10) extend
       case Iceberg => genIcebergTableName(scenarioId)
     }
     val escapedTableName = escapeTableName(tableName)
-    val targetPath = s"$outputPath/${tableName.replace('.', '/')}"
+    val targetPath = format match {
+      case Iceberg =>
+        val simpleTableName = s"iceberg_$scenarioId"
+        s"$outputPath/$databaseName/$simpleTableName"
+      case _ => s"$outputPath/${tableName.replace('.', '/')}"
+    }
 
     dropTableIfExists(format, escapedTableName, targetPath)
 
@@ -213,25 +221,27 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10) extend
                              tableName: String): Unit = {
     val escapedTableName = escapeTableName(tableName)
 
-    withPersisted(df) {
-      // NOTE: Iceberg requires incoming dataset to be partitioned, in case it's being ingested
-      //       into partitioned table
-      val repartitionedDF = df
+    // NOTE: Iceberg requires incoming dataset to be partitioned, in case it's being ingested
+    //       into partitioned table
+    val repartitionedDF = df
 
-      repartitionedDF.createOrReplaceTempView(s"source")
+    repartitionedDF.createOrReplaceTempView(s"source")
 
-      operation match {
-        case OperationType.Insert =>
-          // NOTE: Iceberg requires ordering of the dataset when being inserted into partitioned tables
-          val insertIntoTableSql =
-            s"""
-               |INSERT INTO $escapedTableName
-               |SELECT * FROM source ${if (nonPartitioned) "" else ""}
-               |""".stripMargin
+    operation match {
+      case OperationType.Insert =>
+        // NOTE: Iceberg requires ordering of the dataset when being inserted into partitioned tables
+        // No caching needed for INSERT as it's a single-pass operation
+        val insertIntoTableSql =
+          s"""
+             |INSERT INTO $escapedTableName
+             |SELECT * FROM source ${if (nonPartitioned) "" else ""}
+             |""".stripMargin
 
-          executeSparkSql(spark, insertIntoTableSql)
+        executeSparkSql(spark, insertIntoTableSql)
 
-        case OperationType.Upsert =>
+      case OperationType.Upsert =>
+        // Cache for MERGE operations as they require multiple passes over the data
+        withPersisted(df) {
           df.createOrReplaceTempView(s"source")
           // Execute MERGE INTO performing
           //   - Updates for all records w/ matching (partition, key) tuples
@@ -244,8 +254,7 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10) extend
                |WHEN MATCHED THEN UPDATE SET *
                |WHEN NOT MATCHED THEN INSERT *
                |""".stripMargin)
-
-      }
+        }
     }
   }
 
@@ -371,11 +380,16 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10) extend
   private def escapeTableName(tableName: String) =
     tableName.split('.').map(np => s"`$np`").mkString(".")
 
-  private def genIcebergTableName(experimentId: String): String =
-    s"default.iceberg_$experimentId"
+  private def genIcebergTableName(experimentId: String): String = {
+    val tableName = s"iceberg_$experimentId"
+    catalogName match {
+      case Some(catalog) => s"$catalog.$databaseName.$tableName"
+      case None => s"$databaseName.$tableName"
+    }
+  }
 
   private def genHudiTableName(experimentId: String): String =
-    s"default.hudi-$experimentId".replace("-", "_")
+    s"$databaseName.hudi-$experimentId".replace("-", "_")
 }
 
 sealed trait OperationType {
@@ -425,6 +439,8 @@ case class LoadConfig(numberOfRounds: Int = 10,
                       options: Map[String, String] = Map.empty,
                       nonPartitioned: Boolean = false,
                       experimentId: String = StringUtils.generateRandomString(10),
+                      catalogName: Option[String] = None,
+                      databaseName: String = "default",
                       startRound: Int = 0
                      )
 
@@ -492,9 +508,17 @@ object IncrementalLoader {
         .action((x, c) => c.copy(experimentId = x))
         .text("Experiment ID")
 
+      opt[String]("catalog")
+        .action((x, c) => c.copy(catalogName = Some(x)))
+        .text("Catalog name (optional, for Iceberg with catalogs)")
+
+      opt[String]("database")
+        .action((x, c) => c.copy(databaseName = x))
+        .text("Database/schema/namespace name (default: 'default')")
+
       opt[Int]("start-round")
         .action((x, c) => c.copy(startRound = x))
-        .text("Start round for incremental loading. Default 0.")
+        .text("Start round to load from (default: 0)")
     }
 
     parser.parse(args, LoadConfig()) match {
@@ -503,7 +527,7 @@ object IncrementalLoader {
           .appName("lake-loader incremental data loader")
           .getOrCreate()
 
-        val dataLoader = new IncrementalLoader(spark, config.numberOfRounds)
+        val dataLoader = new IncrementalLoader(spark, config.numberOfRounds, config.catalogName, config.databaseName)
         dataLoader.doWrites(
           config.inputPath,
           config.outputPath,
