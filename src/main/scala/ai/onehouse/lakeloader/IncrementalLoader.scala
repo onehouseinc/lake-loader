@@ -132,11 +132,11 @@ class IncrementalLoader(val spark: SparkSession,
          |""".stripMargin)
 
     val allRoundTimes = new ListBuffer[Long]()
-    (startRound until numRounds).foreach(roundNo => {
+    (startRound until startRound + numRounds).foreach(roundNo => {
       println(
         s"""
            |$lineSepBold
-           |Writing round ${roundNo + 1} / $numRounds
+           |Writing round ${roundNo - startRound + 1} / $numRounds (absolute round: $roundNo)
            |$lineSepBold
            |""".stripMargin)
 
