@@ -331,9 +331,16 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10) extend
 
     apiType match {
       case ApiType.SparkDatasourceApi =>
-        val targetOpts = opts ++ Map(
+        val partitionOpts = if (nonPartitioned) {
+          Map.empty[String, String]
+        } else {
+          Map(DataSourceWriteOptions.PARTITIONPATH_FIELD.key() -> "partition")
+        }
+
+        val targetOpts = opts ++ partitionOpts ++ Map(
           HoodieWriteConfig.TBL_NAME.key() -> "hudi",
         )
+
         repartitionedDF.write.format("hudi")
           .options(targetOpts)
           .option(DataSourceWriteOptions.OPERATION.key, operation.toString)
@@ -356,11 +363,16 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10) extend
             // Execute MERGE INTO performing
             //   - Updates for all records w/ matching (partition, key) tuples
             //   - Inserts for all remaining records
+            val joinCondition = if (nonPartitioned) {
+              "s.key = t.key"
+            } else {
+              "s.key = t.key AND s.partition = t.partition"
+            }
             executeSparkSql(spark,
               s"""
                  |MERGE INTO $escapedTableName t
                  |USING (SELECT * FROM source s)
-                 |ON s.key = t.key AND s.partition = t.partition
+                 |ON $joinCondition
                  |WHEN MATCHED THEN UPDATE SET *
                  |WHEN NOT MATCHED THEN INSERT *
                  |""".stripMargin)
