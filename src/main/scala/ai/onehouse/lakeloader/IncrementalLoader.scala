@@ -31,7 +31,7 @@ import io.delta.tables.DeltaTable
 import java.io.Serializable
 import scala.collection.mutable.ListBuffer
 
-class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10) extends Serializable {
+class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10, val catalog: String = "spark_catalog", val database: String = "default") extends Serializable {
 
   private def tryCreateTable(schema: StructType,
                              outputPath: String,
@@ -384,10 +384,10 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10) extend
     tableName.split('.').map(np => s"`$np`").mkString(".")
 
   private def genIcebergTableName(experimentId: String): String =
-    s"default.iceberg_$experimentId"
+    s"$catalog.$database.iceberg_$experimentId"
 
   private def genHudiTableName(experimentId: String): String =
-    s"default.hudi-$experimentId".replace("-", "_")
+    s"$catalog.$database.hudi-$experimentId".replace("-", "_")
 }
 
 sealed trait OperationType {
@@ -437,7 +437,9 @@ case class LoadConfig(numberOfRounds: Int = 10,
                       options: Map[String, String] = Map.empty,
                       nonPartitioned: Boolean = false,
                       experimentId: String = StringUtils.generateRandomString(10),
-                      startRound: Int = 0
+                      startRound: Int = 0,
+                      catalog: String = "spark_catalog",
+                      database: String = "default"
                      )
 
 object IncrementalLoader {
@@ -507,6 +509,14 @@ object IncrementalLoader {
       opt[Int]("start-round")
         .action((x, c) => c.copy(startRound = x))
         .text("Start round for incremental loading. Default 0.")
+
+      opt[String]("catalog")
+        .action((x, c) => c.copy(catalog = x))
+        .text("Catalog name. Default spark_catalog.")
+
+      opt[String]("database")
+        .action((x, c) => c.copy(database = x))
+        .text("Database name. Default default.")
     }
 
     parser.parse(args, LoadConfig()) match {
@@ -515,7 +525,7 @@ object IncrementalLoader {
           .appName("lake-loader incremental data loader")
           .getOrCreate()
 
-        val dataLoader = new IncrementalLoader(spark, config.numberOfRounds)
+        val dataLoader = new IncrementalLoader(spark, config.numberOfRounds, config.catalog, config.database)
         dataLoader.doWrites(
           config.inputPath,
           config.outputPath,
