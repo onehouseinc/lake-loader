@@ -37,7 +37,8 @@ object OperationType {
       OperationType.fromString(s)
     } catch {
       case _: IllegalArgumentException =>
-        throw new IllegalArgumentException(s"Invalid operation type: $s. Valid values: ${OperationType.values().mkString(", ")}")
+        throw new IllegalArgumentException(
+          s"Invalid operation type: $s. Valid values: ${OperationType.values().mkString(", ")}")
     }
   }
 }
@@ -63,7 +64,8 @@ object MergeMode {
       MergeMode.fromString(s)
     } catch {
       case _: IllegalArgumentException =>
-        throw new IllegalArgumentException(s"Invalid merge mode: $s. Valid values: ${MergeMode.values().mkString(", ")}")
+        throw new IllegalArgumentException(
+          s"Invalid merge mode: $s. Valid values: ${MergeMode.values().mkString(", ")}")
     }
   }
 }
@@ -86,14 +88,16 @@ object StorageFormat {
     case _ => throw new IllegalArgumentException(s"Invalid StorageFormat: $s")
   }
 
-  def values(): List[String] = List(Iceberg.asString, Delta.asString, Hudi.asString, Parquet.asString)
+  def values(): List[String] =
+    List(Iceberg.asString, Delta.asString, Hudi.asString, Parquet.asString)
 
   implicit val storageFormatRead: scopt.Read[StorageFormat] = scopt.Read.reads { s =>
     try {
       StorageFormat.fromString(s)
     } catch {
       case _: IllegalArgumentException =>
-        throw new IllegalArgumentException(s"Invalid storage format: $s. Valid values: ${StorageFormat.values().mkString(", ")}")
+        throw new IllegalArgumentException(
+          s"Invalid storage format: $s. Valid values: ${StorageFormat.values().mkString(", ")}")
     }
   }
 }
@@ -105,18 +109,19 @@ object ApiType {
   case object SparkSqlApi extends ApiType { val asString = "spark-sql" }
 }
 
-case class LoadConfig(numberOfRounds: Int = 10,
-                      inputPath: String = "",
-                      outputPath: String = "",
-                      parallelism: Int = 100,
-                      format: String = "hudi",
-                      operationType: String = "upsert",
-                      options: Map[String, String] = Map.empty,
-                      nonPartitioned: Boolean = false,
-                      experimentId: String = StringUtils.generateRandomString(10),
-                      startRound: Int = 0,
-                      catalog: String = "spark_catalog",
-                      database: String = "default",
-                      mergeMode: String = "update-insert",
-                      additionalMergeConditionColumns: Seq[String] = Seq.empty,
-                      updateColumns: Seq[String] = Seq.empty)
+case class LoadConfig(
+    numberOfRounds: Int = 10,
+    inputPath: String = "",
+    outputPath: String = "",
+    parallelism: Int = 100,
+    format: String = "hudi",
+    operationType: String = "upsert",
+    options: Map[String, String] = Map.empty,
+    nonPartitioned: Boolean = false,
+    experimentId: String = StringUtils.generateRandomString(10),
+    startRound: Int = 0,
+    catalog: String = "spark_catalog",
+    database: String = "default",
+    mergeMode: String = "update-insert",
+    additionalMergeConditionColumns: Seq[String] = Seq.empty,
+    updateColumns: Seq[String] = Seq.empty)

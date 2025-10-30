@@ -41,11 +41,13 @@ object IncrementalLoaderParser {
 
     opt[StorageFormat]("format")
       .action((x, c) => c.copy(format = x.asString))
-      .text(s"Format to load data into. Options: ${StorageFormat.values().mkString(", ")}. Default: hudi")
+      .text(
+        s"Format to load data into. Options: ${StorageFormat.values().mkString(", ")}. Default: hudi")
 
     opt[OperationType]("operation-type")
       .action((x, c) => c.copy(operationType = x.asString))
-      .text(s"Write operation type. Options: ${OperationType.values().mkString(", ")}. Default: upsert")
+      .text(
+        s"Write operation type. Options: ${OperationType.values().mkString(", ")}. Default: upsert")
 
     opt[Map[String, String]]("options")
       .action((x, c) => c.copy(options = x))
@@ -77,7 +79,8 @@ object IncrementalLoaderParser {
 
     opt[MergeMode]("merge-mode")
       .action((x, c) => c.copy(mergeMode = x.asString))
-      .text(s"Merge mode for upsert operations. Options: ${MergeMode.values().mkString(", ")}. Default: update-insert")
+      .text(
+        s"Merge mode for upsert operations. Options: ${MergeMode.values().mkString(", ")}. Default: update-insert")
 
     opt[Seq[String]]("update-columns")
       .action((x, c) => c.copy(updateColumns = x))
