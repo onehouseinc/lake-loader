@@ -31,6 +31,15 @@ object OperationType {
   }
 
   def values(): List[String] = List(Upsert.asString, Insert.asString)
+
+  implicit val operationTypeRead: scopt.Read[OperationType] = scopt.Read.reads { s =>
+    try {
+      OperationType.fromString(s)
+    } catch {
+      case _: IllegalArgumentException =>
+        throw new IllegalArgumentException(s"Invalid operation type: $s. Valid values: ${OperationType.values().mkString(", ")}")
+    }
+  }
 }
 
 sealed trait MergeMode {
@@ -48,6 +57,15 @@ object MergeMode {
   }
 
   def values(): List[String] = List(UpdateInsert.asString, DeleteInsert.asString)
+
+  implicit val mergeModeRead: scopt.Read[MergeMode] = scopt.Read.reads { s =>
+    try {
+      MergeMode.fromString(s)
+    } catch {
+      case _: IllegalArgumentException =>
+        throw new IllegalArgumentException(s"Invalid merge mode: $s. Valid values: ${MergeMode.values().mkString(", ")}")
+    }
+  }
 }
 
 sealed trait StorageFormat {
@@ -69,6 +87,15 @@ object StorageFormat {
   }
 
   def values(): List[String] = List(Iceberg.asString, Delta.asString, Hudi.asString, Parquet.asString)
+
+  implicit val storageFormatRead: scopt.Read[StorageFormat] = scopt.Read.reads { s =>
+    try {
+      StorageFormat.fromString(s)
+    } catch {
+      case _: IllegalArgumentException =>
+        throw new IllegalArgumentException(s"Invalid storage format: $s. Valid values: ${StorageFormat.values().mkString(", ")}")
+    }
+  }
 }
 
 sealed trait ApiType { def asString: String }

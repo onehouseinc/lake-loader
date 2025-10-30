@@ -14,7 +14,7 @@
 
 package ai.onehouse.lakeloader.parser
 
-import ai.onehouse.lakeloader.configs.{LoadConfig, OperationType, StorageFormat}
+import ai.onehouse.lakeloader.configs.{LoadConfig, MergeMode, OperationType, StorageFormat}
 
 object IncrementalLoaderParser {
 
@@ -23,7 +23,7 @@ object IncrementalLoaderParser {
 
     opt[Int]("number-rounds")
       .action((x, c) => c.copy(numberOfRounds = x))
-      .text("Number of rounds of incremental change data to generate. Default 10.")
+      .text("Number of rounds of incremental change data to generate. Default: 10")
 
     opt[String]('i', "input-path")
       .required()
@@ -36,58 +36,52 @@ object IncrementalLoaderParser {
       .text("Output path")
 
     opt[Int]("parallelism")
-      .required()
       .action((x, c) => c.copy(parallelism = x))
-      .text("Parallelism")
+      .text("Parallelism. Default: 100")
 
-    opt[String]("format")
-      .required()
-      .action((x, c) => c.copy(format = x))
-      .validate { x =>
-        if (StorageFormat.values().contains(x))
-          Right(())
-        else
-          Left(s"Invalid format: '$x'. Allowed: ${StorageFormat.values().mkString(", ")}")
-      }
-      .text("Format to load data into. Options: " + StorageFormat.values().mkString(", "))
+    opt[StorageFormat]("format")
+      .action((x, c) => c.copy(format = x.asString))
+      .text(s"Format to load data into. Options: ${StorageFormat.values().mkString(", ")}. Default: hudi")
 
-    opt[String]("operation-type")
-      .action((x, c) => c.copy(operationType = x))
-      .validate { x =>
-        if (OperationType.values().contains(x))
-          Right(())
-        else
-          Left(s"Invalid operation: '$x'. Allowed: ${OperationType.values().mkString(", ")}")
-      }
-      .text("Write operation type")
+    opt[OperationType]("operation-type")
+      .action((x, c) => c.copy(operationType = x.asString))
+      .text(s"Write operation type. Options: ${OperationType.values().mkString(", ")}. Default: upsert")
 
     opt[Map[String, String]]("options")
       .action((x, c) => c.copy(options = x))
-      .text("Options")
+      .text("Options. Default: empty map")
 
     opt[Boolean]("non-partitioned")
       .action((x, c) => c.copy(nonPartitioned = x))
-      .text("Non partitioned")
+      .text("Non partitioned. Default: false")
 
     opt[String]('e', "experiment-id")
       .action((x, c) => c.copy(experimentId = x))
-      .text("Experiment ID")
+      .text("Experiment ID. Default: random string of length 10")
 
     opt[Int]("start-round")
       .action((x, c) => c.copy(startRound = x))
-      .text("Start round for incremental loading. Default 0.")
+      .text("Start round for incremental loading. Default: 0")
 
     opt[String]("catalog")
       .action((x, c) => c.copy(catalog = x))
-      .text("Catalog name. Default spark_catalog.")
+      .text("Catalog name. Default: spark_catalog")
 
     opt[String]("database")
       .action((x, c) => c.copy(database = x))
-      .text("Database name. Default default.")
+      .text("Database name. Default: default")
 
     opt[Seq[String]]("additional-merge-condition-columns")
       .action((x, c) => c.copy(additionalMergeConditionColumns = x))
-      .text("Additional columns to append to merge condition on top of defaults. Default base: [key] for non-partitioned, [key, partition] for partitioned.")
+      .text("Additional columns to append to merge condition on top of defaults. Default base: [key] for non-partitioned, [key, partition] for partitioned")
+
+    opt[MergeMode]("merge-mode")
+      .action((x, c) => c.copy(mergeMode = x.asString))
+      .text(s"Merge mode for upsert operations. Options: ${MergeMode.values().mkString(", ")}. Default: update-insert")
+
+    opt[Seq[String]]("update-columns")
+      .action((x, c) => c.copy(updateColumns = x))
+      .text("Columns to update during merge operations. If not specified, all columns will be updated. Default: all columns")
   }
 
   /**

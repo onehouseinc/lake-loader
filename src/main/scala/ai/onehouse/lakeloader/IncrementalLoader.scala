@@ -144,6 +144,8 @@ class IncrementalLoader(val spark: SparkSession,
                mergeConditionColumns: Seq[String] = Seq("key", "partition"),
                updateColumns: Seq[String] = Seq.empty,
                mergeMode: MergeMode = MergeMode.UpdateInsert): Unit = {
+    require(inputPath.nonEmpty, "Input path cannot be empty")
+    require(outputPath.nonEmpty, "Output path cannot be empty")
     println(
       s"""
          |$lineSepBold
@@ -396,6 +398,13 @@ class IncrementalLoader(val spark: SparkSession,
 
     apiType match {
       case ApiType.SparkDatasourceApi =>
+        require(mergeMode != MergeMode.DeleteInsert,
+          "Hudi sparkDataSourceApi does not support delete operations.")
+        require(updateColumns.isEmpty,
+          "Hudi sparkDataSourceApi does not support partial column updates.")
+        require(mergeConditionColumns == Seq("key", "partition"),
+          "Hudi sparkDataSourceApi does not support custom merge conditions.")
+
         val partitionOpts = if (nonPartitioned) {
           Map.empty[String, String]
         } else {

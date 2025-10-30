@@ -150,12 +150,11 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
                        keyType: KeyType = KeyTypes.Random,
                        startRound: Int = 0,
                        updatePatterns: UpdatePatterns = UpdatePatterns.Uniform,
-                       numPartitionsToUpdate: Int = -1,
-                       mergeConditionColumns: Seq[String] = Seq.empty): Unit = {
-    assert(totalPartitions != -1 || partitionDistributionMatrixOpt.isDefined, "Either set the total partitions or configure the partitionDistributionMatrixOpt")
-    assert(numColumns >= 5, "The number of columns needs to be at least 5 since we need at least 4 cols for key, partition, round, and timestamp.")
-    assert(numPartitionsToUpdate <= totalPartitions, "The number of partitions to update should be lower than the total partitions")
-    assert(mergeConditionColumns.nonEmpty, "The number of columns used for MERGE INTO join condition must be greater than zero")
+                       numPartitionsToUpdate: Int = -1): Unit = {
+    require(path.nonEmpty, "Path cannot be empty")
+    require(totalPartitions != -1 || partitionDistributionMatrixOpt.isDefined, "Either set the total partitions or configure the partitionDistributionMatrixOpt")
+    require(numColumns >= 5, "The number of columns needs to be at least 5 since we need at least 4 cols for key, partition, round, and timestamp.")
+    require(numPartitionsToUpdate <= totalPartitions, "The number of partitions to update should be lower than the total partitions")
 
     // Compute records distribution matrix across partitions; such matrix
     // could be explicitly provided as an optional parameter prescribing corresponding
@@ -205,8 +204,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
 
         val insertsDF = spark.createDataFrame(insertsRDD, schema)
         val upsertDF = if (numUpdates == 0) insertsDF else insertsDF.union(
-          generateUpdates(updatePatterns, partitionPaths, numUpdates, numPartitionsToUpdate, path,
-            targetParallelism, curRound, mergeConditionColumns))
+          generateUpdates(updatePatterns, partitionPaths, numUpdates, numPartitionsToUpdate, path, targetParallelism, curRound))
 
         spark.time {
           upsertDF
@@ -231,13 +229,12 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
                               numPartitionsToUpdate: Int,
                               path: String,
                               targetParallelism: Int,
-                              currentRound: Int,
-                              mergeConditionColumns: Seq[String]): DataFrame = {
+                              currentRound: Int): DataFrame = {
     val rawUpdatesDF = updatePatterns match {
       case Uniform =>
         getRandomlyDistributedUpdates(partitionPaths, numUpdateRecords, numPartitionsToUpdate, path, currentRound)
       case Zipf =>
-        getZipfDistributedUpdates(partitionPaths, numUpdateRecords, numPartitionsToUpdate, path, currentRound, mergeConditionColumns)
+        getZipfDistributedUpdates(partitionPaths, numUpdateRecords, numPartitionsToUpdate, path, currentRound)
       case _ =>
         throw new IllegalArgumentException(s"Unsupported update pattern: $updatePatterns")
     }
@@ -261,8 +258,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
                                         numUpdateRecords: Long,
                                         numPartitionsToWrite: Int,
                                         path: String,
-                                        currentRound: Int,
-                                        mergeConditionColumns: Seq[String]): DataFrame = {
+                                        currentRound: Int): DataFrame = {
     val numRecordsPerPartition: List[Int] = MathUtils.zipfDistribution(numUpdateRecords, numPartitionsToWrite)
     val partitionsToUpdate = partitionPaths.take(numPartitionsToWrite)
     println(s"Generating zipf distributed updates from partitions for round # $currentRound: Partitions $partitionsToUpdate")
@@ -271,11 +267,9 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     sourceDf = sourceDf.filter(col("partition").isin(partitionsToUpdate: _*))
     sourceDf.createOrReplaceTempView("source_df_partitions")
 
-    // Build SELECT clause dynamically with merge condition columns
-    val selectColumns = mergeConditionColumns.map(col => s"`$col`").mkString(", ")
     var rankedDF = spark.sql(
-      s"""
-        | SELECT $selectColumns, `round`, rank(key) OVER (PARTITION BY key ORDER BY round DESC) as key_rank
+      """
+        | SELECT key, partition, `round`, rank(key) OVER (PARTITION BY key ORDER BY round DESC) as key_rank
         | FROM source_df_partitions
         |""".stripMargin
     )
@@ -310,7 +304,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     })
 
     // Join sourceDf with fullPlan on key, partition, and round
-    val joinCols = mergeConditionColumns ++ Seq("round")
+    val joinCols = Seq("key", "partition", "round")
     val joinedDf = sourceDf.join(fullPlan, joinCols, "inner")
     joinedDf
   }
@@ -399,8 +393,7 @@ object ChangeDataGenerator {
           keyType = config.keyType,
           startRound = config.startRound,
           updatePatterns = config.updatePattern,
-          numPartitionsToUpdate = config.numPartitionsToUpdate,
-          mergeConditionColumns = ChangeDataGeneratorParser.getMergeConditionColumns(config)
+          numPartitionsToUpdate = config.numPartitionsToUpdate
         )
 
         spark.stop()
