@@ -14,8 +14,10 @@ package ai.onehouse.lakeloader
  * limitations under the License.
  */
 
-import ai.onehouse.lakeloader.IncrementalLoader.ApiType
-import ai.onehouse.lakeloader.StorageFormat.{Delta, Hudi, Iceberg, Parquet}
+import ai.onehouse.lakeloader.configs.MergeMode.{DeleteInsert, UpdateInsert}
+import ai.onehouse.lakeloader.configs.{ApiType, LoadConfig, MergeMode, OperationType, StorageFormat}
+import ai.onehouse.lakeloader.configs.StorageFormat.{Delta, Hudi, Iceberg, Parquet}
+import ai.onehouse.lakeloader.parser.IncrementalLoaderParser
 import org.apache.hadoop.fs.Path
 import org.apache.hudi.DataSourceWriteOptions
 import org.apache.hudi.config.HoodieWriteConfig
@@ -31,7 +33,10 @@ import io.delta.tables.DeltaTable
 import java.io.Serializable
 import scala.collection.mutable.ListBuffer
 
-class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10, val catalog: String = "spark_catalog", val database: String = "default") extends Serializable {
+class IncrementalLoader(val spark: SparkSession,
+                        val numRounds: Int = 10,
+                        val catalog: String = "spark_catalog",
+                        val database: String = "default") extends Serializable {
 
   private def tryCreateTable(schema: StructType,
                              outputPath: String,
@@ -104,6 +109,26 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10, val ca
     }
   }
 
+  private def buildMergeCondition(mergeColumns: Seq[String]): String = {
+    mergeColumns.map(col => s"t.$col = s.$col").mkString(" AND ")
+  }
+
+  private def buildUpdateSetClause(updateColumns: Seq[String]): String = {
+    if (updateColumns.isEmpty) {
+      "*"
+    } else {
+      updateColumns.map(col => s"$col = s.$col").mkString(", ")
+    }
+  }
+
+  private def buildUpdateExprMap(updateColumns: Seq[String]): Map[String, String] = {
+    if (updateColumns.isEmpty) {
+      Map.empty
+    } else {
+      updateColumns.map(col => col -> s"newData.$col").toMap
+    }
+  }
+
   def doWrites(inputPath: String,
                outputPath: String,
                parallelism: Int = 100,
@@ -115,7 +140,12 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10, val ca
                overwrite: Boolean = true,
                nonPartitioned: Boolean = false,
                experimentId: String = StringUtils.generateRandomString(10),
-               startRound: Int = 0): Unit = {
+               startRound: Int = 0,
+               mergeConditionColumns: Seq[String] = Seq("key", "partition"),
+               updateColumns: Seq[String] = Seq.empty,
+               mergeMode: MergeMode = MergeMode.UpdateInsert): Unit = {
+    require(inputPath.nonEmpty, "Input path cannot be empty")
+    require(outputPath.nonEmpty, "Output path cannot be empty")
     println(
       s"""
          |$lineSepBold
@@ -160,7 +190,7 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10, val ca
       }
 
       allRoundTimes += doWriteRound(inputDF, outputPath, parallelism, format, apiType, saveMode,
-        targetOperation, opts, nonPartitioned, experimentId)
+        targetOperation, opts, nonPartitioned, mergeConditionColumns, updateColumns, mergeMode, experimentId)
 
       inputDF.unpersist()
     })
@@ -183,21 +213,27 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10, val ca
                    operation: OperationType = OperationType.Upsert,
                    opts: Map[String, String] = Map(),
                    nonPartitioned: Boolean = false,
+                   mergeConditionColumns: Seq[String],
+                   updateColumns: Seq[String],
+                   mergeMode: MergeMode,
                    experimentId: String): Long = {
     val startMs = System.currentTimeMillis()
 
     format match {
       case Hudi =>
         val tableName = genHudiTableName(experimentId)
-        writeToHudi(inputDF, operation, outputPath, parallelism, apiType, saveMode, opts, nonPartitioned, tableName)
+        writeToHudi(inputDF, operation, outputPath, parallelism, apiType, saveMode, opts, nonPartitioned,
+          mergeConditionColumns, updateColumns, mergeMode, tableName)
       case Delta =>
         val tableName = s"delta-$experimentId"
-        writeToDelta(inputDF, operation, outputPath, parallelism, saveMode, nonPartitioned, tableName)
+        writeToDelta(inputDF, operation, outputPath, parallelism, saveMode, nonPartitioned,
+          mergeConditionColumns, updateColumns, mergeMode, tableName)
       case Parquet =>
         writeToParquet(inputDF, operation, outputPath, parallelism, saveMode, nonPartitioned)
       case Iceberg =>
         val tableName = genIcebergTableName(experimentId)
-        writeToIceberg(inputDF, operation, nonPartitioned, tableName)
+        writeToIceberg(inputDF, operation, nonPartitioned, mergeConditionColumns,
+          updateColumns, mergeMode, tableName)
       case _ =>
         throw new UnsupportedOperationException(s"$format is not supported")
     }
@@ -210,6 +246,9 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10, val ca
   private def writeToIceberg(df: DataFrame,
                              operation: OperationType,
                              nonPartitioned: Boolean,
+                             mergeConditionColumns: Seq[String],
+                             updateColumns: Seq[String],
+                             mergeMode: MergeMode,
                              tableName: String): Unit = {
     val escapedTableName = escapeTableName(tableName)
 
@@ -233,6 +272,17 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10, val ca
 
         case OperationType.Upsert =>
           df.createOrReplaceTempView(s"source")
+
+          val mergeCondition = buildMergeCondition(mergeConditionColumns)
+          val updateSetClause = buildUpdateSetClause(updateColumns)
+
+          val matchedClause = mergeMode match {
+            case UpdateInsert =>
+              s"WHEN MATCHED THEN UPDATE SET $updateSetClause"
+            case DeleteInsert =>
+              "WHEN MATCHED THEN DELETE"
+          }
+
           // Execute MERGE INTO performing
           //   - Updates for all records w/ matching (partition, key) tuples
           //   - Inserts for all remaining records
@@ -240,11 +290,10 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10, val ca
             s"""
                |MERGE INTO $escapedTableName t
                |USING (SELECT * FROM source s)
-               |ON t.key = s.key AND t.partition = s.partition
-               |WHEN MATCHED THEN UPDATE SET *
+               |ON $mergeCondition
+               |$matchedClause
                |WHEN NOT MATCHED THEN INSERT *
                |""".stripMargin)
-
       }
     }
   }
@@ -255,6 +304,9 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10, val ca
                            parallelism: Int,
                            saveMode: SaveMode,
                            nonPartitioned: Boolean,
+                           mergeConditionColumns: Seq[String],
+                           updateColumns: Seq[String],
+                           mergeMode: MergeMode,
                            tableName: String): Unit = {
     val targetPath = s"$outputPath/$tableName"
     operation match {
@@ -281,12 +333,24 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10, val ca
           throw new UnsupportedOperationException("Operation 'upsert' cannot be performed")
         } else {
           val deltaTable = DeltaTable.forPath(targetPath)
-          deltaTable.as("oldData")
-            .merge(
-              df.as("newData"),
-              "oldData.key = newData.key AND oldData.partition = newData.partition")
-            .whenMatched
-            .updateAll()
+
+          val mergeCondition = mergeConditionColumns.map(col => s"oldData.$col = newData.$col").mkString(" AND ")
+
+          val mergeBuilder = deltaTable.as("oldData")
+            .merge(df.as("newData"), mergeCondition)
+          val matchedBuilder = mergeMode match {
+            case UpdateInsert =>
+              if (updateColumns.isEmpty) {
+                mergeBuilder.whenMatched.updateAll()
+              } else {
+                val updateMap = buildUpdateExprMap(updateColumns)
+                mergeBuilder.whenMatched.updateExpr(updateMap)
+              }
+            case DeleteInsert =>
+              mergeBuilder.whenMatched.delete()
+          }
+
+          matchedBuilder
             .whenNotMatched
             .insertAll()
             .execute()
@@ -321,6 +385,9 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10, val ca
                           saveMode: SaveMode,
                           opts: Map[String, String],
                           nonPartitioned: Boolean,
+                          mergeConditionColumns: Seq[String],
+                          updateColumns: Seq[String],
+                          mergeMode: MergeMode,
                           tableName: String): Unit = {
     // TODO cleanup
     val repartitionedDF = if (nonPartitioned) {
@@ -331,6 +398,13 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10, val ca
 
     apiType match {
       case ApiType.SparkDatasourceApi =>
+        require(mergeMode != MergeMode.DeleteInsert,
+          "Hudi sparkDataSourceApi does not support delete operations.")
+        require(updateColumns.isEmpty,
+          "Hudi sparkDataSourceApi does not support partial column updates.")
+        require(mergeConditionColumns == Seq("key", "partition"),
+          "Hudi sparkDataSourceApi does not support custom merge conditions.")
+
         val partitionOpts = if (nonPartitioned) {
           Map.empty[String, String]
         } else {
@@ -360,20 +434,22 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10, val ca
                  |""".stripMargin
             executeSparkSql(spark, insertIntoTableSql)
           case OperationType.Upsert =>
-            // Execute MERGE INTO performing
-            //   - Updates for all records w/ matching (partition, key) tuples
-            //   - Inserts for all remaining records
-            val joinCondition = if (nonPartitioned) {
-              "s.key = t.key"
-            } else {
-              "s.key = t.key AND s.partition = t.partition"
+            val mergeCondition = buildMergeCondition(mergeConditionColumns)
+            val updateSetClause = buildUpdateSetClause(updateColumns)
+            val matchedClause = mergeMode match {
+              case UpdateInsert =>
+                s"WHEN MATCHED THEN UPDATE SET $updateSetClause"
+              case DeleteInsert =>
+                "WHEN MATCHED THEN DELETE"
             }
+
+            // Execute MERGE INTO
             executeSparkSql(spark,
               s"""
                  |MERGE INTO $escapedTableName t
                  |USING (SELECT * FROM source s)
-                 |ON $joinCondition
-                 |WHEN MATCHED THEN UPDATE SET *
+                 |ON $mergeCondition
+                 |$matchedClause
                  |WHEN NOT MATCHED THEN INSERT *
                  |""".stripMargin)
         }
@@ -390,136 +466,9 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10, val ca
     s"$catalog.$database.hudi-$experimentId".replace("-", "_")
 }
 
-sealed trait OperationType {
-  def asString: String
-}
-
-object OperationType {
-  case object Upsert extends OperationType { val asString = "upsert" }
-  case object Insert extends OperationType { val asString = "insert" }
-
-  def fromString(s: String): OperationType = s match {
-    case "upsert" => Upsert
-    case "insert" => Insert
-    case _ => throw new IllegalArgumentException(s"Invalid OperationType: $s")
-  }
-
-  def values(): List[String] = List(Upsert.asString, Insert.asString)
-}
-
-sealed trait StorageFormat {
-  def asString: String
-}
-
-object StorageFormat {
-  case object Iceberg extends StorageFormat { val asString = "iceberg" }
-  case object Delta extends StorageFormat { val asString = "delta" }
-  case object Hudi extends StorageFormat { val asString = "hudi" }
-  case object Parquet extends StorageFormat { val asString = "parquet" }
-
-  def fromString(s: String): StorageFormat = s match {
-    case "iceberg" => Iceberg
-    case "delta" => Delta
-    case "hudi" => Hudi
-    case "parquet" => Parquet
-    case _ => throw new IllegalArgumentException(s"Invalid StorageFormat: $s")
-  }
-
-  def values(): List[String] = List(Iceberg.asString, Delta.asString, Hudi.asString, Parquet.asString)
-}
-
-case class LoadConfig(numberOfRounds: Int = 10,
-                      inputPath: String = "",
-                      outputPath: String = "",
-                      parallelism: Int = 100,
-                      format: String = "hudi",
-                      operationType: String = "upsert",
-                      options: Map[String, String] = Map.empty,
-                      nonPartitioned: Boolean = false,
-                      experimentId: String = StringUtils.generateRandomString(10),
-                      startRound: Int = 0,
-                      catalog: String = "spark_catalog",
-                      database: String = "default"
-                     )
-
 object IncrementalLoader {
-  // Enum for API types
-  sealed trait ApiType { def asString: String }
-  object ApiType {
-    case object SparkDatasourceApi extends ApiType { val asString = "spark-datasource" }
-    case object SparkSqlApi extends ApiType { val asString = "spark-sql" }
-  }
-
   def main(args: Array[String]): Unit = {
-    val parser = new scopt.OptionParser[LoadConfig]("lake-loader | incremental loader") {
-      head("lake-loader", "1.x")
-
-      opt[Int]("number-rounds")
-        .action((x, c) => c.copy(numberOfRounds = x))
-        .text("Number of rounds of incremental change data to generate. Default 10.")
-
-      opt[String]('i', "input-path")
-        .required()
-        .action((x, c) => c.copy(inputPath = x))
-        .text("Input path")
-
-      opt[String]('o', "output-path")
-        .required()
-        .action((x, c) => c.copy(outputPath = x))
-        .text("Output path")
-
-      opt[Int]("parallelism")
-        .required()
-        .action((x, c) => c.copy(parallelism = x))
-        .text("Parallelism")
-
-      opt[String]("format")
-        .required()
-        .action((x, c) => c.copy(format = x))
-        .validate { x =>
-          if (StorageFormat.values().contains(x))
-            Right(())
-          else
-            Left(s"Invalid format: '$x'. Allowed: ${StorageFormat.values().mkString(", ")}")
-        }
-        .text("Format to load data into. Options: " + StorageFormat.values().mkString(", "))
-
-      opt[String]("operation-type")
-        .action((x, c) => c.copy(operationType = x))
-        .validate { x =>
-          if (OperationType.values().contains(x))
-            Right(())
-          else
-            Left(s"Invalid operation: '$x'. Allowed: ${OperationType.values().mkString(", ")}")
-        }
-        .text("Write operation type")
-
-      opt[Map[String, String]]("options")
-        .action((x, c) => c.copy(options = x))
-        .text("Options")
-
-      opt[Boolean]("non-partitioned")
-        .action((x, c) => c.copy(nonPartitioned = x))
-        .text("Non partitioned")
-
-      opt[String]('e', "experiment-id")
-        .action((x, c) => c.copy(experimentId = x))
-        .text("Experiment ID")
-
-      opt[Int]("start-round")
-        .action((x, c) => c.copy(startRound = x))
-        .text("Start round for incremental loading. Default 0.")
-
-      opt[String]("catalog")
-        .action((x, c) => c.copy(catalog = x))
-        .text("Catalog name. Default spark_catalog.")
-
-      opt[String]("database")
-        .action((x, c) => c.copy(database = x))
-        .text("Database name. Default default.")
-    }
-
-    parser.parse(args, LoadConfig()) match {
+    IncrementalLoaderParser.parser.parse(args, LoadConfig()) match {
       case Some(config) =>
         val spark = SparkSession.builder
           .appName("lake-loader incremental data loader")
@@ -535,7 +484,10 @@ object IncrementalLoader {
           opts = config.options,
           nonPartitioned = config.nonPartitioned,
           experimentId = config.experimentId,
-          startRound = config.startRound
+          startRound = config.startRound,
+          mergeConditionColumns = IncrementalLoaderParser.getMergeConditionColumns(config),
+          updateColumns = config.updateColumns,
+          mergeMode = MergeMode.fromString(config.mergeMode)
         )
         spark.stop()
       case None =>
