@@ -20,8 +20,7 @@ import org.apache.spark.storage.StorageLevel
 object SparkUtils {
 
   def executeSparkSql(spark: SparkSession, sql: String): Unit = {
-    println(
-      s"""
+    println(s"""
          |Executing:
          |--------------------------------
          |$sql

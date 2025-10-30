@@ -54,8 +54,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       StructField("key", StringType, nullable = false),
       StructField("partition", StringType, nullable = false),
       StructField("round", IntegerType, nullable = false),
-      StructField("ts", LongType, nullable = false),
-    ) ++ (0 until numFields - 4)
+      StructField("ts", LongType, nullable = false)) ++ (0 until numFields - 4)
       .map(i => {
         i % 10 match {
           case 0 => StructField(s"textField1$i", StringType, nullable = true)
@@ -73,12 +72,13 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     StructType(fields)
   }
 
-  private def generateNewRecord(round: Int,
-                                size: Int,
-                                partitionPaths: List[String],
-                                partitionDistributionCDF: List[Double],
-                                keyType: KeyType,
-                                schema: StructType) = {
+  private def generateNewRecord(
+      round: Int,
+      size: Int,
+      partitionPaths: List[String],
+      partitionDistributionCDF: List[Double],
+      keyType: KeyType,
+      schema: StructType) = {
     val ts = System.currentTimeMillis()
     // To induce (semi-) ordering on the keys we simply prefix its random part (UUID) w/ a ts;
     //
@@ -93,14 +93,15 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     }
 
     val sizeFactor: Int = Math.max(size / schema.fields.size, 1)
-    val fieldValues = schema.fields.map(
-      field => {
-        field.name match {
-          case "key" => key
-          case "partition" => partitionPaths(MathUtils.sampleFromCDF(partitionDistributionCDF, random.nextDouble()))
-          case "round" => round
-          case "ts" => ts
-          case randomField => if (randomField.startsWith("textField")) {
+    val fieldValues = schema.fields.map(field => {
+      field.name match {
+        case "key" => key
+        case "partition" =>
+          partitionPaths(MathUtils.sampleFromCDF(partitionDistributionCDF, random.nextDouble()))
+        case "round" => round
+        case "ts" => ts
+        case randomField =>
+          if (randomField.startsWith("textField")) {
             StringUtils.generateRandomString(sizeFactor + random.nextInt(sizeFactor))
           } else if (randomField.startsWith("decimalField")) {
             random.nextFloat()
@@ -115,8 +116,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
           } else {
             throw new IllegalArgumentException(s"${field.name} not defined in schema.")
           }
-        }
-      })
+      }
+    })
 
     Row.fromSeq(fieldValues)
   }
@@ -138,23 +139,30 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
    * @param updatePatterns                 Update pattern for generating updates: random (uniform) or zipf (skewed).
    * @param numPartitionsToUpdate          Number of partitions to update (default -1/ none)
    */
-  def generateWorkload(path: String,
-                       roundsDistribution: List[Long] = List.fill(numRounds)(1000000L),
-                       numColumns: Int = 10,
-                       recordSize: Int = 1024,
-                       updateRatio: Double = 0.5f,
-                       totalPartitions: Int = -1,
-                       partitionDistributionMatrixOpt: Option[List[List[Double]]] = None,
-                       targetDataFileSize: Int = 128 * 1024 * 1024,
-                       skipIfExists: Boolean = false,
-                       keyType: KeyType = KeyTypes.Random,
-                       startRound: Int = 0,
-                       updatePatterns: UpdatePatterns = UpdatePatterns.Uniform,
-                       numPartitionsToUpdate: Int = -1): Unit = {
+  def generateWorkload(
+      path: String,
+      roundsDistribution: List[Long] = List.fill(numRounds)(1000000L),
+      numColumns: Int = 10,
+      recordSize: Int = 1024,
+      updateRatio: Double = 0.5f,
+      totalPartitions: Int = -1,
+      partitionDistributionMatrixOpt: Option[List[List[Double]]] = None,
+      targetDataFileSize: Int = 128 * 1024 * 1024,
+      skipIfExists: Boolean = false,
+      keyType: KeyType = KeyTypes.Random,
+      startRound: Int = 0,
+      updatePatterns: UpdatePatterns = UpdatePatterns.Uniform,
+      numPartitionsToUpdate: Int = -1): Unit = {
     require(path.nonEmpty, "Path cannot be empty")
-    require(totalPartitions != -1 || partitionDistributionMatrixOpt.isDefined, "Either set the total partitions or configure the partitionDistributionMatrixOpt")
-    require(numColumns >= 5, "The number of columns needs to be at least 5 since we need at least 4 cols for key, partition, round, and timestamp.")
-    require(numPartitionsToUpdate <= totalPartitions, "The number of partitions to update should be lower than the total partitions")
+    require(
+      totalPartitions != -1 || partitionDistributionMatrixOpt.isDefined,
+      "Either set the total partitions or configure the partitionDistributionMatrixOpt")
+    require(
+      numColumns >= 5,
+      "The number of columns needs to be at least 5 since we need at least 4 cols for key, partition, round, and timestamp.")
+    require(
+      numPartitionsToUpdate <= totalPartitions,
+      "The number of partitions to update should be lower than the total partitions")
 
     // Compute records distribution matrix across partitions; such matrix
     // could be explicitly provided as an optional parameter prescribing corresponding
@@ -178,18 +186,22 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       val targetLocationPath = new Path(targetLocation)
       val fs = targetLocationPath.getFileSystem(spark.sparkContext.hadoopConfiguration)
 
-      if (skipIfExists && fs.exists(targetLocationPath) && fs.listFiles(targetLocationPath, false).hasNext) {
+      if (skipIfExists && fs
+          .exists(targetLocationPath) && fs.listFiles(targetLocationPath, false).hasNext) {
         println(s"Skipping generation for round # $curRound, location $targetLocation is not empty")
       } else {
         // Calculate inserts/updates split
         val targetRecords = roundsDistribution(curRound)
-        val numUpdates = if (curRound == 0 || numPartitionsToUpdate <= 0) 0 else Math.min((updateRatio * targetRecords).toLong, curRound * targetRecords)
+        val numUpdates =
+          if (curRound == 0 || numPartitionsToUpdate <= 0) 0
+          else Math.min((updateRatio * targetRecords).toLong, curRound * targetRecords)
         val numInserts = targetRecords - numUpdates
 
-        val targetParallelism = Math.max(2, (targetRecords / (targetDataFileSize / (recordSize * COMPRESSION_RATIO_GUESS))).toInt)
+        val targetParallelism = Math.max(
+          2,
+          (targetRecords / (targetDataFileSize / (recordSize * COMPRESSION_RATIO_GUESS))).toInt)
 
-        println(
-          s"""
+        println(s"""
              |$lineSepBold
              |Round # $curRound: numInserts $numInserts, numUpdates $numUpdates
              |Creating at $targetLocation
@@ -200,11 +212,28 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
         // Generating inserts
         ////////////////////////////////////////
         val insertsRDD = genParallelRDD(spark, targetParallelism, 0, numInserts)
-          .map(_ => generateNewRecord(curRound, recordSize, partitionPaths, partitionDistributionCDF, keyType, schema))
+          .map(_ =>
+            generateNewRecord(
+              curRound,
+              recordSize,
+              partitionPaths,
+              partitionDistributionCDF,
+              keyType,
+              schema))
 
         val insertsDF = spark.createDataFrame(insertsRDD, schema)
-        val upsertDF = if (numUpdates == 0) insertsDF else insertsDF.union(
-          generateUpdates(updatePatterns, partitionPaths, numUpdates, numPartitionsToUpdate, path, targetParallelism, curRound))
+        val upsertDF =
+          if (numUpdates == 0) insertsDF
+          else
+            insertsDF.union(
+              generateUpdates(
+                updatePatterns,
+                partitionPaths,
+                numUpdates,
+                numPartitionsToUpdate,
+                path,
+                targetParallelism,
+                curRound))
 
         spark.time {
           upsertDF
@@ -223,18 +252,29 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
   ////////////////////////////////////////
   // Generating updates based on distribution type.
   ////////////////////////////////////////
-  private def generateUpdates(updatePatterns: UpdatePatterns,
-                              partitionPaths: List[String],
-                              numUpdateRecords: Long,
-                              numPartitionsToUpdate: Int,
-                              path: String,
-                              targetParallelism: Int,
-                              currentRound: Int): DataFrame = {
+  private def generateUpdates(
+      updatePatterns: UpdatePatterns,
+      partitionPaths: List[String],
+      numUpdateRecords: Long,
+      numPartitionsToUpdate: Int,
+      path: String,
+      targetParallelism: Int,
+      currentRound: Int): DataFrame = {
     val rawUpdatesDF = updatePatterns match {
       case Uniform =>
-        getRandomlyDistributedUpdates(partitionPaths, numUpdateRecords, numPartitionsToUpdate, path, currentRound)
+        getRandomlyDistributedUpdates(
+          partitionPaths,
+          numUpdateRecords,
+          numPartitionsToUpdate,
+          path,
+          currentRound)
       case Zipf =>
-        getZipfDistributedUpdates(partitionPaths, numUpdateRecords, numPartitionsToUpdate, path, currentRound)
+        getZipfDistributedUpdates(
+          partitionPaths,
+          numUpdateRecords,
+          numPartitionsToUpdate,
+          path,
+          currentRound)
       case _ =>
         throw new IllegalArgumentException(s"Unsupported update pattern: $updatePatterns")
     }
@@ -254,25 +294,26 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     partitionLocalLimit(finalUpdatedDf.repartition(targetParallelism), numUpdateRecords.toInt)
   }
 
-  private def getZipfDistributedUpdates(partitionPaths: List[String],
-                                        numUpdateRecords: Long,
-                                        numPartitionsToWrite: Int,
-                                        path: String,
-                                        currentRound: Int): DataFrame = {
-    val numRecordsPerPartition: List[Int] = MathUtils.zipfDistribution(numUpdateRecords, numPartitionsToWrite)
+  private def getZipfDistributedUpdates(
+      partitionPaths: List[String],
+      numUpdateRecords: Long,
+      numPartitionsToWrite: Int,
+      path: String,
+      currentRound: Int): DataFrame = {
+    val numRecordsPerPartition: List[Int] =
+      MathUtils.zipfDistribution(numUpdateRecords, numPartitionsToWrite)
     val partitionsToUpdate = partitionPaths.take(numPartitionsToWrite)
-    println(s"Generating zipf distributed updates from partitions for round # $currentRound: Partitions $partitionsToUpdate")
+    println(
+      s"Generating zipf distributed updates from partitions for round # $currentRound: Partitions $partitionsToUpdate")
 
     var sourceDf = spark.read.format(ChangeDataGenerator.DEFAULT_DATA_GEN_FORMAT).load(s"$path/*")
     sourceDf = sourceDf.filter(col("partition").isin(partitionsToUpdate: _*))
     sourceDf.createOrReplaceTempView("source_df_partitions")
 
-    var rankedDF = spark.sql(
-      """
+    var rankedDF = spark.sql("""
         | SELECT key, partition, `round`, rank(key) OVER (PARTITION BY key ORDER BY round DESC) as key_rank
         | FROM source_df_partitions
-        |""".stripMargin
-    )
+        |""".stripMargin)
     rankedDF = rankedDF.filter($"key_rank" === 1).drop(s"key_rank")
     rankedDF.persist()
 
@@ -309,28 +350,29 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     joinedDf
   }
 
-  private def getRandomlyDistributedUpdates(partitionPaths: List[String],
-                                            numUpdateRecords: Long,
-                                            numPartitionsToWrite: Int,
-                                            path: String,
-                                            currentRound: Int): DataFrame = {
+  private def getRandomlyDistributedUpdates(
+      partitionPaths: List[String],
+      numUpdateRecords: Long,
+      numPartitionsToWrite: Int,
+      path: String,
+      currentRound: Int): DataFrame = {
     val partitionsToUpdate = partitionPaths.take(numPartitionsToWrite)
-    println(s"Generating random updates from partitions for round # $currentRound: Partitions $partitionsToUpdate")
+    println(
+      s"Generating random updates from partitions for round # $currentRound: Partitions $partitionsToUpdate")
 
     var sourceDf = spark.read.format(ChangeDataGenerator.DEFAULT_DATA_GEN_FORMAT).load(s"$path/*")
     sourceDf = sourceDf.filter(col("partition").isin(partitionsToUpdate: _*))
     sourceDf.createOrReplaceTempView("source_df_partitions")
 
-    var rankedDF = spark.sql(
-      """
+    var rankedDF = spark.sql("""
         | SELECT *, rank(key) OVER (PARTITION BY key ORDER BY round DESC) as key_rank
         | FROM source_df_partitions
-        |""".stripMargin
-    )
+        |""".stripMargin)
     rankedDF = rankedDF.filter($"key_rank" === 1).drop(s"key_rank")
     rankedDF.persist()
     val totalRecords = rankedDF.count()
-    println(s"Picking random updates for round: # $currentRound: from total records = $totalRecords")
+    println(
+      s"Picking random updates for round: # $currentRound: from total records = $totalRecords")
 
     val samplingRatio = Math.min(1.0, numUpdateRecords.toDouble / totalRecords.toDouble)
     val finalDF = rankedDF
@@ -342,18 +384,24 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
   private def genDateBasedPartitionValues(targetPartitionsCount: Int): List[String] = {
     // This will generate an ordered sequence of dates in the format of "yyyy/mm/dd"
     // (where most recent one is the first element)
-    List.fill(targetPartitionsCount)(LocalDate.now()).zipWithIndex
+    List
+      .fill(targetPartitionsCount)(LocalDate.now())
+      .zipWithIndex
       .map(t => t._1.minusDays(targetPartitionsCount - t._2))
       .map(d => s"${d.getYear}-${"%02d".format(d.getMonthValue)}-${"%02d".format(d.getDayOfMonth)}")
       .reverse
   }
 
-  private def genPartitionsDistributionMatrix(totalPartitions: Int, partitionDistributionMatrixOpt: Option[List[List[Double]]]) = {
+  private def genPartitionsDistributionMatrix(
+      totalPartitions: Int,
+      partitionDistributionMatrixOpt: Option[List[List[Double]]]) = {
     partitionDistributionMatrixOpt match {
       case Some(partitionDistMatrix) =>
         assert(partitionDistMatrix.size == numRounds)
         partitionDistMatrix.foreach { dist =>
-          assert(totalPartitions == -1 || totalPartitions == dist.size, s"$totalPartitions != ${dist.size}")
+          assert(
+            totalPartitions == -1 || totalPartitions == dist.size,
+            s"$totalPartitions != ${dist.size}")
           assert((dist.sum - 1.0) < 1e-5, s"${dist.sum} != 1.0")
         }
 
@@ -393,8 +441,7 @@ object ChangeDataGenerator {
           keyType = config.keyType,
           startRound = config.startRound,
           updatePatterns = config.updatePattern,
-          numPartitionsToUpdate = config.numPartitionsToUpdate
-        )
+          numPartitionsToUpdate = config.numPartitionsToUpdate)
 
         spark.stop()
 
@@ -404,9 +451,14 @@ object ChangeDataGenerator {
     }
   }
 
-  private def genParallelRDD(spark: SparkSession, targetParallelism: Int, start: Long, end: Long): RDD[Long] = {
+  private def genParallelRDD(
+      spark: SparkSession,
+      targetParallelism: Int,
+      start: Long,
+      end: Long): RDD[Long] = {
     val partitionSize = (end - start) / targetParallelism
-    spark.sparkContext.parallelize(0 to targetParallelism, targetParallelism)
+    spark.sparkContext
+      .parallelize(0 to targetParallelism, targetParallelism)
       .mapPartitions { it =>
         val partitionStart = it.next() * partitionSize
         (partitionStart to partitionStart + partitionSize).iterator
