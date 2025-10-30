@@ -16,7 +16,11 @@ The tool consists of two main components:
 
 Lake loader is built with Java 11 or 17 using Maven.
 
-* mvn clean package
+Run `mvn clean package` to build.
+
+### Formatting
+
+Run `mvn scalafmt:format` to apply scala formatting.
 
 ### Engine Compatibility
 

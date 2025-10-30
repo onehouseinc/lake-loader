@@ -1,4 +1,21 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one or more
+  ~ contributor license agreements.  See the NOTICE file distributed with
+  ~ this work for additional information regarding copyright ownership.
+  ~ The ASF licenses this file to You under the Apache License, Version 2.0
+  ~ (the "License"); you may not use this file except in compliance with
+  ~ the License.  You may obtain a copy of the License at
+  ~
+  ~    http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing, software
+  ~ distributed under the License is distributed on an "AS IS" BASIS,
+  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  ~ See the License for the specific language governing permissions and
+  ~ limitations under the License.
+  -->
+
 <project xmlns="http://maven.apache.org/POM/4.0.0"
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
@@ -8,8 +25,18 @@
   <artifactId>lake-loader</artifactId>
   <version>0.1</version>
   <packaging>jar</packaging>
+  <licenses>
+    <license>
+      <name>Apache-2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.html</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
 
   <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven-compiler-plugin.version>3.11.0</maven-compiler-plugin.version>
+    <maven.compiler.release>11</maven.compiler.release>
     <maven-jar-plugin.version>2.6</maven-jar-plugin.version>
     <maven-surefire-plugin.version>2.19.1</maven-surefire-plugin.version>
     <maven-shade-plugin.version>3.1.1</maven-shade-plugin.version>
@@ -21,6 +48,7 @@
     <iceberg.version>1.9.0</iceberg.version>
     <delta.version>2.4.0</delta.version>
     <scopt.version>4.1.0</scopt.version>
+    <scalafmt-maven-plugin.version>1.1.1640084764.9f463a9</scalafmt-maven-plugin.version>
   </properties>
 
   <build>
@@ -83,14 +111,29 @@
           </execution>
         </executions>
       </plugin>
-        <plugin>
-            <groupId>org.apache.maven.plugins</groupId>
-            <artifactId>maven-compiler-plugin</artifactId>
-            <configuration>
-                <source>8</source>
-                <target>8</target>
-            </configuration>
-        </plugin>
+      <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-compiler-plugin</artifactId>
+          <version>${maven-compiler-plugin.version}</version>
+          <configuration>
+              <release>${maven.compiler.release}</release>
+              <encoding>${project.build.sourceEncoding}</encoding>
+          </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.antipathy</groupId>
+        <artifactId>mvn-scalafmt_2.12</artifactId>
+        <version>${scalafmt-maven-plugin.version}</version>
+        <configuration>
+          <configLocation>${project.basedir}/.scalafmt.conf</configLocation>
+          <sourceDirectories>
+            <param>${project.basedir}/src/main/scala</param>
+          </sourceDirectories>
+          <testSourceDirectories>
+            <param>${project.basedir}/src/test/scala</param>
+          </testSourceDirectories>
+        </configuration>
+      </plugin>
     </plugins>
     <resources>
       <resource>
