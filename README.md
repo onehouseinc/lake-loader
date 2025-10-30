@@ -56,7 +56,8 @@ datagen.generateWorkload(input_path,
                          totalPartitions = 365,
                          partitionDistributionMatrixOpt = Some(partitionDistribution),
                          updatePatterns=UpdatePatterns.Zipf,
-                         numPartitionsToUpdate=90)
+                         numPartitionsToUpdate=90,
+                         mergeConditionColumns = Seq("key", "partition"))
 )
 ```
 
@@ -84,7 +85,8 @@ datagen.generateWorkload(input_path,
                          updateRatio = 0.5f,
                          totalPartitions = 1,
                          updatePatterns = UpdatePatterns.Uniform,
-                         numPartitionsToUpdate = 1)
+                         numPartitionsToUpdate = 1,
+                         mergeConditionColumns = Seq("key"))
 ```
 
 #### Events table arguments
@@ -113,7 +115,8 @@ datagen.generateWorkload(input_path,
                          recordSize = 200,
                          updateRatio = 0.0f,
                          totalPartitions = numPartitions,
-                         partitionDistributionMatrixOpt = Some(partitionDistribution))
+                         partitionDistributionMatrixOpt = Some(partitionDistribution),
+                         mergeConditionColumns = Seq("key", "partition"))
 ```
 
 ### Instructions to load dataset incrementally across different platforms
