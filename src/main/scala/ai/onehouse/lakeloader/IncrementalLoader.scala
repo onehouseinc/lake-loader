@@ -14,8 +14,8 @@ package ai.onehouse.lakeloader
  * limitations under the License.
  */
 
-import ai.onehouse.lakeloader.IncrementalLoader.ApiType
-import ai.onehouse.lakeloader.StorageFormat.{Delta, Hudi, Iceberg, Parquet}
+import ai.onehouse.lakeloader.configs.{ApiType, LoadConfig, OperationType, StorageFormat}
+import ai.onehouse.lakeloader.configs.StorageFormat.{Delta, Hudi, Iceberg, Parquet}
 import org.apache.hadoop.fs.Path
 import org.apache.hudi.DataSourceWriteOptions
 import org.apache.hudi.config.HoodieWriteConfig
@@ -390,66 +390,7 @@ class IncrementalLoader(val spark: SparkSession, val numRounds: Int = 10, val ca
     s"$catalog.$database.hudi-$experimentId".replace("-", "_")
 }
 
-sealed trait OperationType {
-  def asString: String
-}
-
-object OperationType {
-  case object Upsert extends OperationType { val asString = "upsert" }
-  case object Insert extends OperationType { val asString = "insert" }
-
-  def fromString(s: String): OperationType = s match {
-    case "upsert" => Upsert
-    case "insert" => Insert
-    case _ => throw new IllegalArgumentException(s"Invalid OperationType: $s")
-  }
-
-  def values(): List[String] = List(Upsert.asString, Insert.asString)
-}
-
-sealed trait StorageFormat {
-  def asString: String
-}
-
-object StorageFormat {
-  case object Iceberg extends StorageFormat { val asString = "iceberg" }
-  case object Delta extends StorageFormat { val asString = "delta" }
-  case object Hudi extends StorageFormat { val asString = "hudi" }
-  case object Parquet extends StorageFormat { val asString = "parquet" }
-
-  def fromString(s: String): StorageFormat = s match {
-    case "iceberg" => Iceberg
-    case "delta" => Delta
-    case "hudi" => Hudi
-    case "parquet" => Parquet
-    case _ => throw new IllegalArgumentException(s"Invalid StorageFormat: $s")
-  }
-
-  def values(): List[String] = List(Iceberg.asString, Delta.asString, Hudi.asString, Parquet.asString)
-}
-
-case class LoadConfig(numberOfRounds: Int = 10,
-                      inputPath: String = "",
-                      outputPath: String = "",
-                      parallelism: Int = 100,
-                      format: String = "hudi",
-                      operationType: String = "upsert",
-                      options: Map[String, String] = Map.empty,
-                      nonPartitioned: Boolean = false,
-                      experimentId: String = StringUtils.generateRandomString(10),
-                      startRound: Int = 0,
-                      catalog: String = "spark_catalog",
-                      database: String = "default"
-                     )
-
 object IncrementalLoader {
-  // Enum for API types
-  sealed trait ApiType { def asString: String }
-  object ApiType {
-    case object SparkDatasourceApi extends ApiType { val asString = "spark-datasource" }
-    case object SparkSqlApi extends ApiType { val asString = "spark-sql" }
-  }
-
   def main(args: Array[String]): Unit = {
     val parser = new scopt.OptionParser[LoadConfig]("lake-loader | incremental loader") {
       head("lake-loader", "1.x")

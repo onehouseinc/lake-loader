@@ -14,9 +14,10 @@
 
 package ai.onehouse.lakeloader
 
-import ai.onehouse.lakeloader.ChangeDataGenerator.{COMPRESSION_RATIO_GUESS, KeyTypes, UpdatePatterns, genParallelRDD}
-import ai.onehouse.lakeloader.ChangeDataGenerator.KeyTypes.KeyType
-import ai.onehouse.lakeloader.ChangeDataGenerator.UpdatePatterns.{Uniform, UpdatePatterns, Zipf}
+import ai.onehouse.lakeloader.ChangeDataGenerator.{COMPRESSION_RATIO_GUESS, genParallelRDD}
+import ai.onehouse.lakeloader.configs.{DatagenConfig, KeyTypes, UpdatePatterns}
+import ai.onehouse.lakeloader.configs.KeyTypes.KeyType
+import ai.onehouse.lakeloader.configs.UpdatePatterns.{Uniform, UpdatePatterns, Zipf}
 import org.apache.hadoop.fs.Path
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.CatalystUtil.partitionLocalLimit
@@ -364,35 +365,10 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
   }
 }
 
-case class DatagenConfig(outputPath: String = "",
-                         numberOfRounds: Int = 10,
-                         numberRecordsPerRound: Long = 1000000,
-                         numberColumns: Int = 10,
-                         recordSize: Int = 1024,
-                         updateRatio: Double = 0.5f,
-                         totalPartitions: Int = -1,
-                         targetDataFileSize: Int = 128 * 1024 * 1024,
-                         skipIfExists: Boolean = false,
-                         startRound: Int = 0,
-                         keyType: KeyType = KeyTypes.Random,
-                         updatePattern: UpdatePatterns = UpdatePatterns.Uniform,
-                         numPartitionsToUpdate: Int = -1
-                 )
-
 object ChangeDataGenerator {
 
   val COMPRESSION_RATIO_GUESS = .66
   val DEFAULT_DATA_GEN_FORMAT: String = "parquet"
-
-  object KeyTypes extends Enumeration {
-    type KeyType = Value
-    val Random, TemporallyOrdered = Value
-  }
-
-  object UpdatePatterns extends Enumeration {
-    type UpdatePatterns = Value
-    val Uniform, Zipf = Value
-  }
 
   def main(args: Array[String]): Unit = {
 
