@@ -161,7 +161,7 @@ The following generates dataset for a 1TB **FACT** table with:
 
 ```
 import ai.onehouse.lakeloader.ChangeDataGenerator
-import ai.onehouse.lakeloader.ChangeDataGenerator.UpdatePatterns
+import ai.onehouse.lakeloader.configs.UpdatePatterns
 
 val output_path = "file:///<output_path>"
 val numRounds = 20
@@ -192,7 +192,7 @@ The following generates dateset for a 100GB **DIM** table with
 
 ```
 import ai.onehouse.lakeloader.ChangeDataGenerator
-import ai.onehouse.lakeloader.ChangeDataGenerator.UpdatePatterns
+import ai.onehouse.lakeloader.configs.UpdatePatterns
 
 val output_path = "file:///<input_path>"
 val numRounds = 20
@@ -219,7 +219,7 @@ The following generates dateset for a 2TB **EVENTS** table with
 
 ```
 import ai.onehouse.lakeloader.ChangeDataGenerator
-import ai.onehouse.lakeloader.ChangeDataGenerator.UpdatePatterns
+import ai.onehouse.lakeloader.configs.UpdatePatterns
 
 val output_path = "file:///<output_path>"
 val numRounds = 20
@@ -260,8 +260,8 @@ Using the spark-shell, you need to configure the following additional configs be
 Within spark-shell, run the following command for FACT tables.
 ```
 import ai.onehouse.lakeloader.IncrementalLoader
-import ai.onehouse.lakeloader.StorageFormat
-import ai.onehouse.lakeloader.OperationType
+import ai.onehouse.lakeloader.configs.StorageFormat
+import ai.onehouse.lakeloader.configs.OperationType
 
 val experimentId = "emr_fact"
 val numRounds = 10
@@ -282,8 +282,8 @@ loader.doWrites(inputPath,
 Run the following for DIM tables since they are non-partitioned.
 ```
 import ai.onehouse.lakeloader.IncrementalLoader
-import ai.onehouse.lakeloader.StorageFormat
-import ai.onehouse.lakeloader.OperationType
+import ai.onehouse.lakeloader.configs.StorageFormat
+import ai.onehouse.lakeloader.configs.OperationType
 
 val experimentId = "emr_dim"
 val numRounds = 10
@@ -305,8 +305,8 @@ loader.doWrites(inputPath,
 Run the following for EVENT tables since they are insert-only.
 ```
 import ai.onehouse.lakeloader.IncrementalLoader
-import ai.onehouse.lakeloader.StorageFormat
-import ai.onehouse.lakeloader.OperationType
+import ai.onehouse.lakeloader.configs.StorageFormat
+import ai.onehouse.lakeloader.configs.OperationType
 
 val experimentId = "emr_event"
 val numRounds = 10
@@ -336,8 +336,8 @@ snappy compression and disable parquet file caching.
 Within a notebook, run the following command for FACT tables.
 ```
 import ai.onehouse.lakeloader.IncrementalLoader
-import ai.onehouse.lakeloader.StorageFormat
-import ai.onehouse.lakeloader.OperationType
+import ai.onehouse.lakeloader.configs.StorageFormat
+import ai.onehouse.lakeloader.configs.OperationType
 
 val experimentId = "dbr_fact"
 val numRounds = 10
@@ -359,8 +359,8 @@ loader.doWrites(inputPath,
 Run the following for DIM tables since they are non-partitioned.
 ```
 import ai.onehouse.lakeloader.IncrementalLoader
-import ai.onehouse.lakeloader.StorageFormat
-import ai.onehouse.lakeloader.OperationType
+import ai.onehouse.lakeloader.configs.StorageFormat
+import ai.onehouse.lakeloader.configs.OperationType
 
 val experimentId = "dbr_dim"
 val numRounds = 10
@@ -383,8 +383,8 @@ loader.doWrites(inputPath,
 Run the following for EVENT tables since they are insert-only.
 ```
 import ai.onehouse.lakeloader.IncrementalLoader
-import ai.onehouse.lakeloader.StorageFormat
-import ai.onehouse.lakeloader.OperationType
+import ai.onehouse.lakeloader.configs.StorageFormat
+import ai.onehouse.lakeloader.configs.OperationType
 
 val experimentId = "dbr_event"
 val numRounds = 10
