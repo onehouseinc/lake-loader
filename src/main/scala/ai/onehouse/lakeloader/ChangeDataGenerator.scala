@@ -18,6 +18,7 @@ import ai.onehouse.lakeloader.ChangeDataGenerator.{COMPRESSION_RATIO_GUESS, genP
 import ai.onehouse.lakeloader.configs.{DatagenConfig, KeyTypes, UpdatePatterns}
 import ai.onehouse.lakeloader.configs.KeyTypes.KeyType
 import ai.onehouse.lakeloader.configs.UpdatePatterns.{Uniform, UpdatePatterns, Zipf}
+import ai.onehouse.lakeloader.parser.ChangeDataGeneratorParser
 import org.apache.hadoop.fs.Path
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.CatalystUtil.partitionLocalLimit
@@ -149,10 +150,12 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
                        keyType: KeyType = KeyTypes.Random,
                        startRound: Int = 0,
                        updatePatterns: UpdatePatterns = UpdatePatterns.Uniform,
-                       numPartitionsToUpdate: Int = -1): Unit = {
+                       numPartitionsToUpdate: Int = -1,
+                       mergeConditionColumns: Seq[String] = Seq.empty): Unit = {
     assert(totalPartitions != -1 || partitionDistributionMatrixOpt.isDefined, "Either set the total partitions or configure the partitionDistributionMatrixOpt")
     assert(numColumns >= 5, "The number of columns needs to be at least 5 since we need at least 4 cols for key, partition, round, and timestamp.")
-    assert(numPartitionsToUpdate <= totalPartitions, "the number of partitions to update should be lower than the total partitions")
+    assert(numPartitionsToUpdate <= totalPartitions, "The number of partitions to update should be lower than the total partitions")
+    assert(mergeConditionColumns.nonEmpty, "The number of columns used for MERGE INTO join condition must be greater than zero")
 
     // Compute records distribution matrix across partitions; such matrix
     // could be explicitly provided as an optional parameter prescribing corresponding
@@ -202,7 +205,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
 
         val insertsDF = spark.createDataFrame(insertsRDD, schema)
         val upsertDF = if (numUpdates == 0) insertsDF else insertsDF.union(
-          generateUpdates(updatePatterns, partitionPaths, numUpdates, numPartitionsToUpdate, path, targetParallelism, curRound))
+          generateUpdates(updatePatterns, partitionPaths, numUpdates, numPartitionsToUpdate, path,
+            targetParallelism, curRound, mergeConditionColumns))
 
         spark.time {
           upsertDF
@@ -227,12 +231,13 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
                               numPartitionsToUpdate: Int,
                               path: String,
                               targetParallelism: Int,
-                              currentRound: Int): DataFrame = {
+                              currentRound: Int,
+                              mergeConditionColumns: Seq[String]): DataFrame = {
     val rawUpdatesDF = updatePatterns match {
       case Uniform =>
         getRandomlyDistributedUpdates(partitionPaths, numUpdateRecords, numPartitionsToUpdate, path, currentRound)
       case Zipf =>
-        getZipfDistributedUpdates(partitionPaths, numUpdateRecords, numPartitionsToUpdate, path, currentRound)
+        getZipfDistributedUpdates(partitionPaths, numUpdateRecords, numPartitionsToUpdate, path, currentRound, mergeConditionColumns)
       case _ =>
         throw new IllegalArgumentException(s"Unsupported update pattern: $updatePatterns")
     }
@@ -256,7 +261,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
                                         numUpdateRecords: Long,
                                         numPartitionsToWrite: Int,
                                         path: String,
-                                        currentRound: Int): DataFrame = {
+                                        currentRound: Int,
+                                        mergeConditionColumns: Seq[String]): DataFrame = {
     val numRecordsPerPartition: List[Int] = MathUtils.zipfDistribution(numUpdateRecords, numPartitionsToWrite)
     val partitionsToUpdate = partitionPaths.take(numPartitionsToWrite)
     println(s"Generating zipf distributed updates from partitions for round # $currentRound: Partitions $partitionsToUpdate")
@@ -265,9 +271,11 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     sourceDf = sourceDf.filter(col("partition").isin(partitionsToUpdate: _*))
     sourceDf.createOrReplaceTempView("source_df_partitions")
 
+    // Build SELECT clause dynamically with merge condition columns
+    val selectColumns = mergeConditionColumns.map(col => s"`$col`").mkString(", ")
     var rankedDF = spark.sql(
-      """
-        | SELECT key, partition, `round`, rank(key) OVER (PARTITION BY key ORDER BY round DESC) as key_rank
+      s"""
+        | SELECT $selectColumns, `round`, rank(key) OVER (PARTITION BY key ORDER BY round DESC) as key_rank
         | FROM source_df_partitions
         |""".stripMargin
     )
@@ -302,7 +310,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     })
 
     // Join sourceDf with fullPlan on key, partition, and round
-    val joinCols = Seq("key", "partition", "round")
+    val joinCols = mergeConditionColumns ++ Seq("round")
     val joinedDf = sourceDf.join(fullPlan, joinCols, "inner")
     joinedDf
   }
@@ -372,100 +380,27 @@ object ChangeDataGenerator {
 
   def main(args: Array[String]): Unit = {
 
-    implicit val keyTypeRead: scopt.Read[KeyType] = scopt.Read.reads { s =>
-      try {
-        KeyTypes.withName(s)
-      } catch {
-        case _: NoSuchElementException =>
-          throw new IllegalArgumentException(s"Invalid key type: $s. Valid values: ${KeyTypes.values.mkString(", ")}")
-      }
-    }
-
-    implicit val updatePatternsRead: scopt.Read[UpdatePatterns] = scopt.Read.reads { s =>
-      try {
-        UpdatePatterns.withName(s)
-      } catch {
-        case _: NoSuchElementException =>
-          throw new IllegalArgumentException(s"Invalid update pattern: $s. Valid values: ${UpdatePatterns.values.mkString(", ")}")
-      }
-    }
-
-    val parser = new scopt.OptionParser[DatagenConfig]("lake-loader | change data generator") {
-      head("change data generator usage")
-
-      opt[String]('p', "path")
-        .required()
-        .action((x, c) => c.copy(outputPath = x))
-        .text("Input path")
-
-      opt[Int]("number-rounds")
-        .action((x, c) => c.copy(numberOfRounds = x))
-        .text("Number of rounds of incremental change data to generate. Default 10.")
-
-      opt[Long]("number-records-per-round")
-        .action((x, c) => c.copy(numberRecordsPerRound = x))
-        .text("Number of columns in schema of generated data. Default: 1000000.")
-
-      opt[Int]("number-columns")
-        .action((x, c) => c.copy(numberColumns = x))
-        .text("Number of columns in schema of generated data. Default: 10, minimum 5.")
-
-      opt[Int]("record-size")
-        .action((x, c) => c.copy(recordSize = x))
-        .text("Record Size of the generated data.")
-
-      opt[Double]("update-ratio")
-        .action((x, c) => c.copy(updateRatio = x))
-        .text("Ratio of updates to total records generated in each incremental batch")
-
-      opt[Int]("total-partitions")
-        .action((x, c) => c.copy(totalPartitions = x))
-        .text("Total number of partitions desired for the benchmark table. Default unpartitioned.")
-
-      opt[Int]("datagen-file-size")
-        .action((x, c) => c.copy(targetDataFileSize = x))
-        .text("Target data file size for the data generated files.")
-
-      opt[Boolean]("skip-if-exists")
-        .action((x, c) => c.copy(skipIfExists = x))
-        .text("Skip generated data if folder already exists.")
-
-      opt[Int]("starting-round")
-        .action((x, c) => c.copy(startRound = x))
-        .text("Generate data from specified round. default: 0")
-
-      opt[UpdatePatterns]("update-pattern")
-        .action((x, c) => c.copy(updatePattern = x))
-        .text("The pattern for the updates to be generated for the data.")
-
-      opt[KeyType]("primary-key-type")
-        .action((x, c) => c.copy(keyType = x))
-        .text(s"Primary key type for generated data. Options: ${KeyTypes.values.mkString(", ")}")
-
-      opt[Int]("numPartitionsToUpdate")
-        .action((x, c) => c.copy(numPartitionsToUpdate = x))
-        .text("Number of partitions that should have at least 1 records written to.")
-    }
-
-    parser.parse(args, DatagenConfig()) match {
+    ChangeDataGeneratorParser.parser.parse(args, DatagenConfig()) match {
       case Some(config) =>
         val spark = SparkSession.builder
           .appName("ChangeDataGeneratorApp")
           .getOrCreate()
         val changeDataGenerator = new ChangeDataGenerator(spark, config.numberOfRounds)
-        changeDataGenerator.generateWorkload(config.outputPath,
-          List.fill(config.numberOfRounds)(config.numberRecordsPerRound),
-          config.numberColumns,
-          config.recordSize,
-          config.updateRatio,
-          config.totalPartitions,
-          None,
-          config.targetDataFileSize,
-          config.skipIfExists,
-          config.keyType,
-          config.startRound,
-          config.updatePattern,
-          config.numPartitionsToUpdate
+        changeDataGenerator.generateWorkload(
+          config.outputPath,
+          roundsDistribution = List.fill(config.numberOfRounds)(config.numberRecordsPerRound),
+          numColumns = config.numberColumns,
+          recordSize = config.recordSize,
+          updateRatio = config.updateRatio,
+          totalPartitions = config.totalPartitions,
+          partitionDistributionMatrixOpt = None,
+          targetDataFileSize = config.targetDataFileSize,
+          skipIfExists = config.skipIfExists,
+          keyType = config.keyType,
+          startRound = config.startRound,
+          updatePatterns = config.updatePattern,
+          numPartitionsToUpdate = config.numPartitionsToUpdate,
+          mergeConditionColumns = ChangeDataGeneratorParser.getMergeConditionColumns(config)
         )
 
         spark.stop()

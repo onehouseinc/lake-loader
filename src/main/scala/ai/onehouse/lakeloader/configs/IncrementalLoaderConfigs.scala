@@ -33,6 +33,23 @@ object OperationType {
   def values(): List[String] = List(Upsert.asString, Insert.asString)
 }
 
+sealed trait MergeMode {
+  def asString: String
+}
+
+object MergeMode {
+  case object UpdateInsert extends MergeMode { val asString = "update-insert" }
+  case object DeleteInsert extends MergeMode { val asString = "delete-insert" }
+
+  def fromString(s: String): MergeMode = s match {
+    case "update-insert" => UpdateInsert
+    case "delete-insert" => DeleteInsert
+    case _ => throw new IllegalArgumentException(s"Invalid MergeMode: $s")
+  }
+
+  def values(): List[String] = List(UpdateInsert.asString, DeleteInsert.asString)
+}
+
 sealed trait StorageFormat {
   def asString: String
 }
@@ -54,6 +71,13 @@ object StorageFormat {
   def values(): List[String] = List(Iceberg.asString, Delta.asString, Hudi.asString, Parquet.asString)
 }
 
+sealed trait ApiType { def asString: String }
+
+object ApiType {
+  case object SparkDatasourceApi extends ApiType { val asString = "spark-datasource" }
+  case object SparkSqlApi extends ApiType { val asString = "spark-sql" }
+}
+
 case class LoadConfig(numberOfRounds: Int = 10,
                       inputPath: String = "",
                       outputPath: String = "",
@@ -65,11 +89,7 @@ case class LoadConfig(numberOfRounds: Int = 10,
                       experimentId: String = StringUtils.generateRandomString(10),
                       startRound: Int = 0,
                       catalog: String = "spark_catalog",
-                      database: String = "default")
-
-sealed trait ApiType { def asString: String }
-
-object ApiType {
-  case object SparkDatasourceApi extends ApiType { val asString = "spark-datasource" }
-  case object SparkSqlApi extends ApiType { val asString = "spark-sql" }
-}
+                      database: String = "default",
+                      mergeMode: String = "update-insert",
+                      additionalMergeConditionColumns: Seq[String] = Seq.empty,
+                      updateColumns: Seq[String] = Seq.empty)

@@ -29,7 +29,8 @@ case class DatagenConfig(outputPath: String = "",
                          startRound: Int = 0,
                          keyType: KeyType = KeyTypes.Random,
                          updatePattern: UpdatePatterns = UpdatePatterns.Uniform,
-                         numPartitionsToUpdate: Int = -1)
+                         numPartitionsToUpdate: Int = -1,
+                         additionalMergeConditionColumns: Seq[String] = Seq.empty)
 
 object KeyTypes extends Enumeration {
   type KeyType = Value
@@ -39,4 +40,24 @@ object KeyTypes extends Enumeration {
 object UpdatePatterns extends Enumeration {
   type UpdatePatterns = Value
   val Uniform, Zipf = Value
+}
+
+object ChangeDataGeneratorConfigs {
+  implicit val keyTypeRead: scopt.Read[KeyType] = scopt.Read.reads { s =>
+    try {
+      KeyTypes.withName(s)
+    } catch {
+      case _: NoSuchElementException =>
+        throw new IllegalArgumentException(s"Invalid key type: $s. Valid values: ${KeyTypes.values.mkString(", ")}")
+    }
+  }
+
+  implicit val updatePatternsRead: scopt.Read[UpdatePatterns] = scopt.Read.reads { s =>
+    try {
+      UpdatePatterns.withName(s)
+    } catch {
+      case _: NoSuchElementException =>
+        throw new IllegalArgumentException(s"Invalid update pattern: $s. Valid values: ${UpdatePatterns.values.mkString(", ")}")
+    }
+  }
 }

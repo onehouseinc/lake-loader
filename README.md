@@ -26,7 +26,8 @@ Lake loader requires spark to generate and load the dataset, compatible with spa
 In the following sections, we write down the instantiations of the  ChangeDataGenerator class to 
 generate datasets that can produce **FACT** tables (Zipfian pattern for updates), **DIM** tables (random pattern for updates) and **EVENTS** table (Append-only table).
 
-**NOTE** Instructions provided are for Spark-Shell, but Spark-Submit can be used with the application class name ChangeDataGenerator. 
+**NOTE** Instructions provided are for Spark-Shell, but Spark-Submit can be used with the application class name ChangeDataGenerator.
+
 #### Fact table arguments
 The following generates dateset for a 1TB **FACT** table with 
 - 365 partitions based on date
