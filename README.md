@@ -58,7 +58,8 @@ def generateWorkload(
   startRound: Int = 0,
   primaryKeyType: KeyType = KeyType.Random,
   updatePatterns: UpdatePatterns = UpdatePatterns.Uniform,
-  numPartitionsToUpdate: Int = -1
+  numPartitionsToUpdate: Int = -1,
+  additionalMergeConditionColumns: Seq[String] = Seq.empty
 )
 ```
 
@@ -69,25 +70,27 @@ spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator <jar-file> [opti
 
 ### Parameter Reference
 
-| Parameter             | CLI Flag                               | Type           | Default    | Description                                                     |
-|-----------------------|----------------------------------------|----------------|------------|-----------------------------------------------------------------|
-| outputPath            | `-p`, `--path`                         | String         | *required* | Output path where generated change data will be stored          |
-| numRounds             | `--number-rounds`                      | Int            | 10         | Number of rounds of incremental change data to generate         |
-| N/A (CLI only)        | `--number-records-per-round`           | Long           | 1000000    | Number of records per round (CLI only, uniform across rounds)   |
-| roundsDistribution    | N/A (CLI only)                         | List[Long]     | *computed* | Number of records per round (Scala API only, per-round control) |
-| numColumns            | `--number-columns`                     | Int            | 10         | Number of columns in schema of generated data (min: 5)          |
-| recordSize            | `--record-size`                        | Int            | 1024       | Record size of generated data in bytes                          |
-| updateRatio           | `--update-ratio`                       | Double         | 0.5        | Ratio of updates to total records (0.0-1.0)                     |
-| totalPartitions       | `--total-partitions`                   | Int            | -1         | Total number of partitions (-1 for unpartitioned)               |
-| datagenFileSize       | `--datagen-file-size`                  | Int            | 134217728  | Target data file size in bytes (default: 128MB)                 |
-| skipIfExists          | `--skip-if-exists`                     | Boolean        | false      | Skip generation if folder already exists                        |
-| startRound            | `--start-round`                        | Int            | 0          | Starting round number (for resuming generation)                 |
-| primaryKeyType        | `--primary-key-type`                   | KeyType        | Random     | Key generation type: `Random`, `TemporallyOrdered`              |
-| updatePatterns        | `--update-pattern`                     | UpdatePatterns | Uniform    | Update distribution: `Uniform`, `Zipf`                          |
-| numPartitionsToUpdate | `--num-partitions-to-update`           | Int            | -1         | Number of partitions to update (-1 for all)                     |
+| Parameter                       | CLI Flag                               | Type           | Default    | Description                                                          |
+|---------------------------------|----------------------------------------|----------------|------------|----------------------------------------------------------------------|
+| outputPath                      | `-p`, `--path`                         | String         | *required* | Output path where generated change data will be stored               |
+| numRounds                       | `--number-rounds`                      | Int            | 10         | Number of rounds of incremental change data to generate              |
+| N/A (CLI only)                  | `--number-records-per-round`           | Long           | 1000000    | Number of records per round (CLI only, uniform across rounds)        |
+| roundsDistribution              | N/A (CLI only)                         | List[Long]     | *computed* | Number of records per round (Scala API only, per-round control)      |
+| numColumns                      | `--number-columns`                     | Int            | 10         | Number of columns in schema of generated data (min: 5)               |
+| recordSize                      | `--record-size`                        | Int            | 1024       | Record size of generated data in bytes                               |
+| updateRatio                     | `--update-ratio`                       | Double         | 0.5        | Ratio of updates to total records (0.0-1.0)                          |
+| totalPartitions                 | `--total-partitions`                   | Int            | -1         | Total number of partitions (-1 for unpartitioned)                    |
+| datagenFileSize                 | `--datagen-file-size`                  | Int            | 134217728  | Target data file size in bytes (default: 128MB)                      |
+| skipIfExists                    | `--skip-if-exists`                     | Boolean        | false      | Skip generation if folder already exists                             |
+| startRound                      | `--start-round`                        | Int            | 0          | Starting round number (for resuming generation)                      |
+| primaryKeyType                  | `--primary-key-type`                   | KeyType        | Random     | Key generation type: `Random`, `TemporallyOrdered`                   |
+| updatePatterns                  | `--update-pattern`                     | UpdatePatterns | Uniform    | Update distribution: `Uniform`, `Zipf`                               |
+| numPartitionsToUpdate           | `--num-partitions-to-update`           | Int            | -1         | Number of partitions to update (-1 for all)                          |
+| additionalMergeConditionColumns | `--additional-merge-condition-columns` | Seq[String]    | []         | Additional columns to preserve during updates (beyond key/partition) |
 
 **Notes**:
 * **Record count specification**: CLI uses `--number-records-per-round` which applies a uniform count across all rounds. Scala API uses `roundsDistribution` parameter which allows specifying different record counts for each round (e.g., `List(1000000000L, 10000000L, 10000000L, ...)` for a large initial load followed by smaller incremental rounds).
+* **Additional merge condition columns**: When generating update records, by default only the `key` column is preserved from the original record (`key` and `partition` for partitioned tables). All other columns are randomized with new values. Use `additionalMergeConditionColumns` to specify additional columns that should be preserved during updates instead of being randomized. This is useful when testing merge conditions that depend on multiple columns beyond just the primary key and partition column.
 
 ## IncrementalLoader Parameters
 
@@ -150,8 +153,6 @@ spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> [option
 ### Dataset Generation Examples
 
 This section demonstrates how to use the ChangeDataGenerator to create datasets for different table types: **FACT** tables (Zipfian pattern for updates), **DIM** tables (random pattern for updates), and **EVENTS** tables (Append-only).
-
-**NOTE**: Examples below use Scala API in spark-shell. For CLI usage with spark-submit, use the class name `ai.onehouse.lakeloader.ChangeDataGenerator` and refer to the parameter table above for command-line flags.
 
 #### Fact table arguments
 The following generates dataset for a 1TB **FACT** table with:
@@ -241,11 +242,39 @@ datagen.generateWorkload(output_path,
                          partitionDistributionMatrixOpt = Some(partitionDistribution))
 ```
 
+#### Table with additional merge condition columns
+The following generates a dataset with custom merge conditions:
+- 100 partitions
+- 100M initial records
+- 40 column schema
+- record size of almost 1KB
+- 50% of an incremental batch is updates, 50% are new records
+- Updates preserve `textField0` and `textField1` in addition to `key` and `partition`
+- This allows testing merge operations that depend on multiple column conditions
+
+```
+import ai.onehouse.lakeloader.ChangeDataGenerator
+import ai.onehouse.lakeloader.configs.UpdatePatterns
+
+val output_path = "file:///<output_path>"
+val numRounds = 20
+
+val datagen = new ChangeDataGenerator(spark, numRounds = numRounds)
+datagen.generateWorkload(output_path,
+                         roundsDistribution = List(100000000L) ++ List.fill(numRounds-1)(10000000L),
+                         numColumns = 40,
+                         recordSize = 1000,
+                         updateRatio = 0.5f,
+                         totalPartitions = 100,
+                         updatePatterns = UpdatePatterns.Uniform,
+                         additionalMergeConditionColumns = Seq("textField0", "textField1"))
+```
+
 ### Incremental Loading Examples
 
 This section shows how to use the IncrementalLoader component to load the generated change data into various table formats.
 
-**NOTE**: Examples below use Scala API in spark-shell. For CLI usage with spark-submit, use the class name `ai.onehouse.lakeloader.IncrementalLoader` and refer to the parameter table above for command-line flags.
+**NOTE**: Examples below use Scala API in spark-shell. For CLI usage with spark-submit, see the [spark-submit CLI Examples](#spark-submit-cli-examples) section above.
 
 #### EMR
 Provision a cluster with the latest EMR version 7.5.0. 
