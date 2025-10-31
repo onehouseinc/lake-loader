@@ -79,5 +79,9 @@ object ChangeDataGeneratorParser {
       opt[Int]("num-partitions-to-update")
         .action((x, c) => c.copy(numPartitionsToUpdate = x))
         .text("Number of partitions that should have at least 1 records written to.")
+
+      opt[Seq[String]]("additional-merge-condition-columns")
+        .action((x, c) => c.copy(additionalMergeConditionColumns = x))
+        .text("Additional columns to append to merge condition on top of defaults. Default base: [key] for non-partitioned, [key, partition] for partitioned")
     }
 }
