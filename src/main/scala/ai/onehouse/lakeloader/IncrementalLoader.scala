@@ -81,9 +81,7 @@ class IncrementalLoader(
            |  ${schema.toDDL}
            |)
            |USING ICEBERG
-           |TBLPROPERTIES (
-           |  ${serializedOpts}
-           |)
+           |${if (serializedOpts.nonEmpty) s"TBLPROPERTIES (\n  ${serializedOpts}\n)" else ""}
            |LOCATION '$targetPath'
            |${if (nonPartitioned) "" else "PARTITIONED BY (partition)"}
            |""".stripMargin
