@@ -177,7 +177,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     // Generating workload
     ////////////////////////////////////////
 
-    (startRound until numRounds).foreach(curRound => {
+    (startRound until startRound + numRounds).foreach(curRound => {
       val targetLocation = s"$path/$curRound"
       val partitionDistribution = computedPartitionDistMatrix(curRound)
       // Compute CDF for corresponding records distribution across partitions (for subsequent sampling)
