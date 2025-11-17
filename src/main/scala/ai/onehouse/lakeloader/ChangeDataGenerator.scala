@@ -426,6 +426,7 @@ object ChangeDataGenerator {
       case Some(config) =>
         val spark = SparkSession.builder
           .appName("ChangeDataGeneratorApp")
+          .config("spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2")
           .getOrCreate()
         val changeDataGenerator = new ChangeDataGenerator(spark, config.numberOfRounds)
         changeDataGenerator.generateWorkload(
