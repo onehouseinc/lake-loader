@@ -33,7 +33,7 @@ object SparkUtils {
   }
 
   def withPersisted[T](df: DataFrame)(block: => T): T = {
-    df.persist(StorageLevel.MEMORY_ONLY)
+    df.persist(StorageLevel.MEMORY_AND_DISK_SER)
     try {
       block
     } finally {
