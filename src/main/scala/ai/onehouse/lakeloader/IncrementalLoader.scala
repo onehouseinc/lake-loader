@@ -25,7 +25,7 @@ import org.apache.hudi.keygen.constant.KeyGeneratorOptions
 import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
-import ai.onehouse.lakeloader.utils.SparkUtils.{executeSparkSql, withPersisted}
+import ai.onehouse.lakeloader.utils.SparkUtils.executeSparkSql
 import ai.onehouse.lakeloader.utils.StringUtils
 import ai.onehouse.lakeloader.utils.StringUtils.lineSepBold
 import io.delta.tables.DeltaTable
@@ -272,6 +272,7 @@ class IncrementalLoader(
           inputDF,
           operation,
           nonPartitioned,
+          parallelism,
           mergeConditionColumns,
           updateColumns,
           mergeMode,
@@ -289,56 +290,55 @@ class IncrementalLoader(
       df: DataFrame,
       operation: OperationType,
       nonPartitioned: Boolean,
+      parallelism: Int,
       mergeConditionColumns: Seq[String],
       updateColumns: Seq[String],
       mergeMode: MergeMode,
       tableName: String): Unit = {
     val escapedTableName = escapeTableName(tableName)
+    val repartitionedDF = if (nonPartitioned) {
+      df.repartition(parallelism)
+    } else {
+      df.repartition(parallelism, col("partition"))
+    }
+    repartitionedDF.createOrReplaceTempView(s"source")
 
-    withPersisted(df) {
-      // NOTE: Iceberg requires incoming dataset to be partitioned, in case it's being ingested
-      //       into partitioned table
-      val repartitionedDF = df
+    operation match {
+      case OperationType.Insert =>
+        // NOTE: Iceberg requires ordering of the dataset when being inserted into partitioned tables
+        val insertIntoTableSql =
+          s"""
+             |INSERT INTO $escapedTableName
+             |SELECT * FROM source ${if (nonPartitioned) "" else ""}
+             |""".stripMargin
 
-      repartitionedDF.createOrReplaceTempView(s"source")
+        executeSparkSql(spark, insertIntoTableSql)
 
-      operation match {
-        case OperationType.Insert =>
-          // NOTE: Iceberg requires ordering of the dataset when being inserted into partitioned tables
-          val insertIntoTableSql =
-            s"""
-               |INSERT INTO $escapedTableName
-               |SELECT * FROM source ${if (nonPartitioned) "" else ""}
-               |""".stripMargin
+      case OperationType.Upsert =>
+        df.createOrReplaceTempView(s"source")
 
-          executeSparkSql(spark, insertIntoTableSql)
+        val mergeCondition = buildMergeCondition(mergeConditionColumns)
+        val updateSetClause = buildUpdateSetClause(updateColumns)
 
-        case OperationType.Upsert =>
-          df.createOrReplaceTempView(s"source")
+        val matchedClause = mergeMode match {
+          case UpdateInsert =>
+            s"WHEN MATCHED THEN UPDATE SET $updateSetClause"
+          case DeleteInsert =>
+            "WHEN MATCHED THEN DELETE"
+        }
 
-          val mergeCondition = buildMergeCondition(mergeConditionColumns)
-          val updateSetClause = buildUpdateSetClause(updateColumns)
-
-          val matchedClause = mergeMode match {
-            case UpdateInsert =>
-              s"WHEN MATCHED THEN UPDATE SET $updateSetClause"
-            case DeleteInsert =>
-              "WHEN MATCHED THEN DELETE"
-          }
-
-          // Execute MERGE INTO performing
-          //   - Updates for all records w/ matching (partition, key) tuples
-          //   - Inserts for all remaining records
-          executeSparkSql(
-            spark,
-            s"""
-               |MERGE INTO $escapedTableName t
-               |USING (SELECT * FROM source s)
-               |ON $mergeCondition
-               |$matchedClause
-               |WHEN NOT MATCHED THEN INSERT *
-               |""".stripMargin)
-      }
+        // Execute MERGE INTO performing
+        //   - Updates for all records w/ matching (partition, key) tuples
+        //   - Inserts for all remaining records
+        executeSparkSql(
+          spark,
+          s"""
+             |MERGE INTO $escapedTableName t
+             |USING (SELECT * FROM source s)
+             |ON $mergeCondition
+             |$matchedClause
+             |WHEN NOT MATCHED THEN INSERT *
+             |""".stripMargin)
     }
   }
 
