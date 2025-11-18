@@ -31,13 +31,4 @@ object SparkUtils {
       spark.sql(sql).show()
     }
   }
-
-  def withPersisted[T](df: DataFrame)(block: => T): T = {
-    df.persist(StorageLevel.MEMORY_ONLY)
-    try {
-      block
-    } finally {
-      df.unpersist()
-    }
-  }
 }
