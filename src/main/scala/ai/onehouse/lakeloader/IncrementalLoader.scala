@@ -443,6 +443,7 @@ class IncrementalLoader(
       mergeMode: MergeMode,
       tableName: String): Unit = {
     // TODO cleanup
+    val repartitionedDF = df
     /*val repartitionedDF = if (nonPartitioned) {
       df.repartition(parallelism)
     } else {
