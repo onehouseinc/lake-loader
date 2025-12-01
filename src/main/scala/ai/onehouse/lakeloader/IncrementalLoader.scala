@@ -443,11 +443,11 @@ class IncrementalLoader(
       mergeMode: MergeMode,
       tableName: String): Unit = {
     // TODO cleanup
-    val repartitionedDF = if (nonPartitioned) {
+    /*val repartitionedDF = if (nonPartitioned) {
       df.repartition(parallelism)
     } else {
       df.repartition(parallelism, col("partition"))
-    }
+    }*/
 
     apiType match {
       case ApiType.SparkDatasourceApi =>
@@ -457,9 +457,9 @@ class IncrementalLoader(
         require(
           updateColumns.isEmpty,
           "Hudi sparkDataSourceApi does not support partial column updates.")
-        require(
+        /*require(
           mergeConditionColumns == Seq("key", "partition"),
-          "Hudi sparkDataSourceApi does not support custom merge conditions.")
+          "Hudi sparkDataSourceApi does not support custom merge conditions.")*/
 
         val partitionOpts = if (nonPartitioned) {
           Map.empty[String, String]
