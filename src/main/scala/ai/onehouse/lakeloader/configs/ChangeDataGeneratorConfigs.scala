@@ -30,7 +30,8 @@ case class DatagenConfig(
     startRound: Int = 0,
     keyType: KeyType = KeyTypes.Random,
     updatePattern: UpdatePatterns = UpdatePatterns.Uniform,
-    numPartitionsToUpdate: Int = -1)
+    numPartitionsToUpdate: Int = -1,
+    additionalMergeConditionColumns: Seq[String] = Seq.empty)
 
 object KeyTypes extends Enumeration {
   type KeyType = Value
