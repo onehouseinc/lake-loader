@@ -145,7 +145,7 @@ spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> [option
 | mergeMode             | `--merge-mode`                         | MergeMode          | update-insert        | Merge mode: `update-insert`, `delete-insert`              |
 
 **Notes**:
-* CLI uses `--additional-merge-condition-columns` while Scala API uses `mergeConditionColumns` for the full merge condition list. Default merge columns are `[key, partition]` for partitioned tables.
+* **Merge condition columns**: The CLI automatically uses `[key]` for non-partitioned tables or `[key, partition]` for partitioned tables as the base, with `--additional-merge-condition-columns` adding extra columns. The Scala API requires the full list via `mergeConditionColumns`, defaulting to `[key, partition]`.
 
 ## Usage Examples
 
