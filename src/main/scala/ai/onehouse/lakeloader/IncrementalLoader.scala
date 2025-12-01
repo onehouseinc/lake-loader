@@ -172,7 +172,7 @@ class IncrementalLoader(
       }
 
       val targetOperation = if (roundNo == 0) {
-        OperationType.Insert
+        OperationType.BulkInsert
       } else {
         operation
       }
