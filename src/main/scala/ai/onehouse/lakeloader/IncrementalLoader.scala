@@ -171,12 +171,16 @@ class IncrementalLoader(
       }
 
       val targetOperation = if (roundNo == 0) {
+<<<<<<< HEAD
         if (format == Hudi) {
           // Use the bulk insert operation for Hudi's first batch
           OperationType.BulkInsert
         } else {
           OperationType.Insert
         }
+=======
+        OperationType.BulkInsert
+>>>>>>> d6f1b96 (Adding bulk insert support to hudi)
       } else {
         operation
       }
