@@ -103,17 +103,18 @@ def doWrites(
   inputPath: String,
   outputPath: String,
   parallelism: Int = 100,
-  format: StorageFormat = StorageFormat.Hudi,
+  format: StorageFormat = StorageFormat.Parquet,
   operation: OperationType = OperationType.Upsert,
+  apiType: ApiType = ApiType.SparkDatasourceApi,
   opts: Map[String, String] = Map.empty,
+  cacheInput: Boolean = false,
+  overwrite: Boolean = true,
   nonPartitioned: Boolean = false,
   experimentId: String = generateRandomString(10),
   startRound: Int = 0,
-  catalog: String = "spark_catalog",
-  database: String = "default",
-  mergeConditionColumns: Seq[String] = Seq.empty,
-  mergeMode: MergeMode = MergeMode.UpdateInsert,
-  updateColumns: Seq[String] = Seq.empty
+  mergeConditionColumns: Seq[String] = Seq("key", "partition"),
+  updateColumns: Seq[String] = Seq.empty,
+  mergeMode: MergeMode = MergeMode.UpdateInsert
 )
 ```
 
@@ -124,26 +125,27 @@ spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> [option
 
 ### Parameter Reference
 
-| Parameter             | CLI Flag                               | Type               | Default       | Description                                               |
-|-----------------------|----------------------------------------|--------------------|---------------|-----------------------------------------------------------|
-| inputPath             | `-i`, `--input-path`                   | String             | *required*    | Input path where change data was generated                |
-| outputPath            | `-o`, `--output-path`                  | String             | *required*    | Output path where table data will be written              |
-| numRounds             | `--number-rounds`                      | Int                | 10            | Number of rounds of incremental data to load              |
-| parallelism           | `--parallelism`                        | Int                | 100           | Spark parallelism level for processing                    |
-| format                | `--format`                             | StorageFormat      | hudi          | Table format: `iceberg`, `delta`, `hudi`, `parquet`       |
-| operation             | `--operation-type`                     | OperationType      | upsert        | Write operation: `upsert`, `insert`                       |
-| opts                  | `--options`                            | Map[String,String] | {}            | Format-specific options (e.g., `key1=value1 key2=value2`) |
-| nonPartitioned        | `--non-partitioned`                    | Boolean            | false         | Whether table is non-partitioned                          |
-| experimentId          | `-e`, `--experiment-id`                | String             | *random*      | Experiment identifier for tracking                        |
-| startRound            | `--start-round`                        | Int                | 0             | Starting round for loading (for resuming)                 |
-| catalog               | `--catalog`                            | String             | spark_catalog | Catalog name for table registration                       |
-| database              | `--database`                           | String             | default       | Database name for table registration                      |
-| mergeConditionColumns | `--additional-merge-condition-columns` | Seq[String]        | []            | Additional merge condition columns beyond defaults        |
-| mergeMode             | `--merge-mode`                         | MergeMode          | update-insert | Merge mode: `update-insert`, `delete-insert`              |
-| updateColumns         | `--update-columns`                     | Seq[String]        | []            | Specific columns to update (empty = all columns)          |
+| Parameter             | CLI Flag                               | Type               | Default              | Description                                               |
+|-----------------------|----------------------------------------|--------------------|----------------------|-----------------------------------------------------------|
+| inputPath             | `-i`, `--input-path`                   | String             | *required*           | Input path where change data was generated                |
+| outputPath            | `-o`, `--output-path`                  | String             | *required*           | Output path where table data will be written              |
+| numRounds             | `--number-rounds`                      | Int                | 10                   | Number of rounds of incremental data to load              |
+| parallelism           | `--parallelism`                        | Int                | 100                  | Spark parallelism level for processing                    |
+| format                | `--format`                             | StorageFormat      | parquet              | Table format: `iceberg`, `delta`, `hudi`, `parquet`       |
+| operation             | `--operation-type`                     | OperationType      | upsert               | Write operation: `upsert`, `insert`                       |
+| apiType               | N/A (Scala API only)                   | ApiType            | SparkDatasourceApi   | API type for writing data                                 |
+| opts                  | `--options`                            | Map[String,String] | {}                   | Format-specific options (e.g., `key1=value1 key2=value2`) |
+| cacheInput            | N/A (Scala API only)                   | Boolean            | false                | Whether to cache input data                               |
+| overwrite             | N/A (Scala API only)                   | Boolean            | true                 | Whether to overwrite existing data                        |
+| nonPartitioned        | `--non-partitioned`                    | Boolean            | false                | Whether table is non-partitioned                          |
+| experimentId          | `-e`, `--experiment-id`                | String             | *random*             | Experiment identifier for tracking                        |
+| startRound            | `--start-round`                        | Int                | 0                    | Starting round for loading (for resuming)                 |
+| mergeConditionColumns | `--additional-merge-condition-columns` | Seq[String]        | [key, partition]     | Merge condition columns for upsert operations             |
+| updateColumns         | `--update-columns`                     | Seq[String]        | []                   | Specific columns to update (empty = all columns)          |
+| mergeMode             | `--merge-mode`                         | MergeMode          | update-insert        | Merge mode: `update-insert`, `delete-insert`              |
 
 **Notes**:
-* CLI uses `--additional-merge-condition-columns` while Scala API uses `mergeConditionColumns` for the full merge condition list. Default merge columns are `[key]` for non-partitioned or `[key, partition]` for partitioned tables.
+* **Merge condition columns**: The CLI automatically uses `[key]` for non-partitioned tables or `[key, partition]` for partitioned tables as the base, with `--additional-merge-condition-columns` adding extra columns. The Scala API requires the full list via `mergeConditionColumns`, defaulting to `[key, partition]`.
 
 ## Usage Examples
 
