@@ -58,7 +58,8 @@ def generateWorkload(
   startRound: Int = 0,
   primaryKeyType: KeyType = KeyType.Random,
   updatePatterns: UpdatePatterns = UpdatePatterns.Uniform,
-  numPartitionsToUpdate: Int = -1
+  numPartitionsToUpdate: Int = -1,
+  zipfianShape: Double = 2.93
 )
 ```
 
@@ -85,6 +86,7 @@ spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator <jar-file> [opti
 | primaryKeyType        | `--primary-key-type`                   | KeyType        | Random     | Key generation type: `Random`, `TemporallyOrdered`              |
 | updatePatterns        | `--update-pattern`                     | UpdatePatterns | Uniform    | Update distribution: `Uniform`, `Zipf`                          |
 | numPartitionsToUpdate | `--num-partitions-to-update`           | Int            | -1         | Number of partitions to update (-1 for all)                     |
+| zipfianShape          | `--zipfian-shape`                      | Double         | 2.93       | Shape parameter for Zipf distribution (higher = more skewed)    |
 
 **Notes**:
 * **Record count specification**: CLI uses `--number-records-per-round` which applies a uniform count across all rounds. Scala API uses `roundsDistribution` parameter which allows specifying different record counts for each round (e.g., `List(1000000000L, 10000000L, 10000000L, ...)` for a large initial load followed by smaller incremental rounds).

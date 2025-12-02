@@ -79,5 +79,9 @@ object ChangeDataGeneratorParser {
       opt[Int]("num-partitions-to-update")
         .action((x, c) => c.copy(numPartitionsToUpdate = x))
         .text("Number of partitions that should have at least 1 records written to.")
+
+      opt[Double]("zipfian-shape")
+        .action((x, c) => c.copy(zipfianShape = x))
+        .text("Shape parameter for zipfian distribution (higher = more skewed). Default: 2.93")
     }
 }
