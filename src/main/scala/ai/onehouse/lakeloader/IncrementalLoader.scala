@@ -296,11 +296,12 @@ class IncrementalLoader(
       mergeMode: MergeMode,
       tableName: String): Unit = {
     val escapedTableName = escapeTableName(tableName)
-    val repartitionedDF = if (nonPartitioned) {
+    val repartitionedDF = df.repartition(parallelism)
+    /*val repartitionedDF = if (nonPartitioned) {
       df.repartition(parallelism)
     } else {
       df.repartition(parallelism, col("partition"))
-    }
+    }*/
     repartitionedDF.createOrReplaceTempView(s"source")
 
     operation match {
@@ -443,7 +444,7 @@ class IncrementalLoader(
       mergeMode: MergeMode,
       tableName: String): Unit = {
     // TODO cleanup
-    val repartitionedDF = df
+    val repartitionedDF = df.repartition(parallelism)
     /*val repartitionedDF = if (nonPartitioned) {
       df.repartition(parallelism)
     } else {
@@ -473,7 +474,7 @@ class IncrementalLoader(
         repartitionedDF.write
           .format("hudi")
           .options(targetOpts)
-          .option(DataSourceWriteOptions.OPERATION.key, operation.toString)
+          .option(DataSourceWriteOptions.OPERATION.key, operation.asString)
           .mode(saveMode)
           .save(s"$outputPath/$tableName")
 
