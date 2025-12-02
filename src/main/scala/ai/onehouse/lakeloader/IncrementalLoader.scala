@@ -422,7 +422,7 @@ class IncrementalLoader(
 <<<<<<< HEAD
 =======
     // TODO cleanup
-    val repartitionedDF = df.repartition(parallelism)
+    val repartitionedDF = df
     /*val repartitionedDF = if (nonPartitioned) {
       df.repartition(parallelism)
     } else {
