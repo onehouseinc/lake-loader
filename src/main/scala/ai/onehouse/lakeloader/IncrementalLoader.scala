@@ -419,6 +419,16 @@ class IncrementalLoader(
       updateColumns: Seq[String],
       mergeMode: MergeMode,
       tableName: String): Unit = {
+<<<<<<< HEAD
+=======
+    // TODO cleanup
+    val repartitionedDF = df.repartition(parallelism)
+    /*val repartitionedDF = if (nonPartitioned) {
+      df.repartition(parallelism)
+    } else {
+      df.repartition(parallelism, col("partition"))
+    }*/
+>>>>>>> 9beb780 (Fixing repartition to align for both iceberg and hudi)
 
     apiType match {
       case ApiType.SparkDatasourceApi =>
