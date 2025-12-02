@@ -152,7 +152,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       keyType: KeyType = KeyTypes.Random,
       startRound: Int = 0,
       updatePatterns: UpdatePatterns = UpdatePatterns.Uniform,
-      numPartitionsToUpdate: Int = -1): Unit = {
+      numPartitionsToUpdate: Int = -1,
+      zipfianShape: Double = 2.93): Unit = {
     require(path.nonEmpty, "Path cannot be empty")
     require(
       totalPartitions != -1 || partitionDistributionMatrixOpt.isDefined,
@@ -233,7 +234,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
                 numPartitionsToUpdate,
                 path,
                 targetParallelism,
-                curRound))
+                curRound,
+                zipfianShape))
 
         spark.time {
           upsertDF
@@ -259,7 +261,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       numPartitionsToUpdate: Int,
       path: String,
       targetParallelism: Int,
-      currentRound: Int): DataFrame = {
+      currentRound: Int,
+      zipfianShape: Double): DataFrame = {
     val rawUpdatesDF = updatePatterns match {
       case Uniform =>
         getRandomlyDistributedUpdates(
@@ -274,7 +277,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
           numUpdateRecords,
           numPartitionsToUpdate,
           path,
-          currentRound)
+          currentRound,
+          zipfianShape)
       case _ =>
         throw new IllegalArgumentException(s"Unsupported update pattern: $updatePatterns")
     }
@@ -299,9 +303,10 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       numUpdateRecords: Long,
       numPartitionsToWrite: Int,
       path: String,
-      currentRound: Int): DataFrame = {
+      currentRound: Int,
+      zipfianShape: Double): DataFrame = {
     val numRecordsPerPartition: List[Int] =
-      MathUtils.zipfDistribution(numUpdateRecords, numPartitionsToWrite)
+      MathUtils.zipfDistribution(numUpdateRecords, numPartitionsToWrite, shape = zipfianShape)
     val partitionsToUpdate = partitionPaths.take(numPartitionsToWrite)
     println(
       s"Generating zipf distributed updates from partitions for round # $currentRound: Partitions $partitionsToUpdate")
@@ -442,7 +447,8 @@ object ChangeDataGenerator {
           keyType = config.keyType,
           startRound = config.startRound,
           updatePatterns = config.updatePattern,
-          numPartitionsToUpdate = config.numPartitionsToUpdate)
+          numPartitionsToUpdate = config.numPartitionsToUpdate,
+          zipfianShape = config.zipfianShape)
 
         spark.stop()
 
