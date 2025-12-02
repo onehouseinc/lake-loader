@@ -172,7 +172,7 @@ class IncrementalLoader(
       }
 
       val targetOperation = if (roundNo == 0) {
-        OperationType.BulkInsert
+        OperationType.Insert
       } else {
         operation
       }
@@ -296,7 +296,7 @@ class IncrementalLoader(
       mergeMode: MergeMode,
       tableName: String): Unit = {
     val escapedTableName = escapeTableName(tableName)
-    val repartitionedDF = df.repartition(parallelism)
+    val repartitionedDF = df
     /*val repartitionedDF = if (nonPartitioned) {
       df.repartition(parallelism)
     } else {
@@ -444,7 +444,7 @@ class IncrementalLoader(
       mergeMode: MergeMode,
       tableName: String): Unit = {
     // TODO cleanup
-    val repartitionedDF = df.repartition(parallelism)
+    val repartitionedDF = df
     /*val repartitionedDF = if (nonPartitioned) {
       df.repartition(parallelism)
     } else {
