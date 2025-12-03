@@ -136,7 +136,6 @@ class IncrementalLoader(
   def doWrites(
       inputPath: String,
       outputPath: String,
-      parallelism: Int = 100,
       format: StorageFormat = Parquet,
       operation: OperationType = OperationType.Upsert,
       apiType: ApiType = ApiType.SparkDatasourceApi,
@@ -196,7 +195,6 @@ class IncrementalLoader(
       allRoundTimes += doWriteRound(
         inputDF,
         outputPath,
-        parallelism,
         format,
         apiType,
         saveMode,
@@ -222,7 +220,6 @@ class IncrementalLoader(
   def doWriteRound(
       inputDF: DataFrame,
       outputPath: String,
-      parallelism: Int = 2,
       format: StorageFormat = Parquet,
       apiType: ApiType = ApiType.SparkDatasourceApi,
       saveMode: SaveMode = SaveMode.Append,
@@ -242,7 +239,6 @@ class IncrementalLoader(
           inputDF,
           operation,
           outputPath,
-          parallelism,
           apiType,
           saveMode,
           opts,
@@ -257,7 +253,6 @@ class IncrementalLoader(
           inputDF,
           operation,
           outputPath,
-          parallelism,
           saveMode,
           nonPartitioned,
           mergeConditionColumns,
@@ -265,14 +260,13 @@ class IncrementalLoader(
           mergeMode,
           tableName)
       case Parquet =>
-        writeToParquet(inputDF, operation, outputPath, parallelism, saveMode, nonPartitioned)
+        writeToParquet(inputDF, operation, outputPath, saveMode)
       case Iceberg =>
         val tableName = genIcebergTableName(experimentId)
         writeToIceberg(
           inputDF,
           operation,
           nonPartitioned,
-          parallelism,
           mergeConditionColumns,
           updateColumns,
           mergeMode,
@@ -290,18 +284,12 @@ class IncrementalLoader(
       df: DataFrame,
       operation: OperationType,
       nonPartitioned: Boolean,
-      parallelism: Int,
       mergeConditionColumns: Seq[String],
       updateColumns: Seq[String],
       mergeMode: MergeMode,
       tableName: String): Unit = {
     val escapedTableName = escapeTableName(tableName)
-    val repartitionedDF = if (nonPartitioned) {
-      df.repartition(parallelism)
-    } else {
-      df.repartition(parallelism, col("partition"))
-    }
-    repartitionedDF.createOrReplaceTempView(s"source")
+    df.createOrReplaceTempView(s"source")
 
     operation match {
       case OperationType.Insert =>
@@ -346,7 +334,6 @@ class IncrementalLoader(
       df: DataFrame,
       operation: OperationType,
       outputPath: String,
-      parallelism: Int,
       saveMode: SaveMode,
       nonPartitioned: Boolean,
       mergeConditionColumns: Seq[String],
@@ -356,13 +343,7 @@ class IncrementalLoader(
     val targetPath = s"$outputPath/$tableName"
     operation match {
       case OperationType.Insert =>
-        val repartitionedDF = if (nonPartitioned) {
-          df.repartition(parallelism)
-        } else {
-          df.repartition(parallelism, col("partition"))
-        }
-
-        val writer = repartitionedDF.write.format("delta")
+        val writer = df.write.format("delta")
         val partitionedWriter = if (nonPartitioned) {
           writer
         } else {
@@ -408,18 +389,10 @@ class IncrementalLoader(
       df: DataFrame,
       operation: OperationType,
       outputPath: String,
-      parallelism: Int,
-      saveMode: SaveMode,
-      nonPartitioned: Boolean): Unit = {
+      saveMode: SaveMode): Unit = {
     operation match {
       case OperationType.Insert =>
-        val repartitionedDF = if (nonPartitioned) {
-          df.repartition(parallelism)
-        } else {
-          df.repartition(parallelism, col("partition"))
-        }
-
-        repartitionedDF.write
+        df.write
           .format("parquet")
           .mode(saveMode)
           .save(s"$outputPath/parquet")
@@ -433,7 +406,6 @@ class IncrementalLoader(
       df: DataFrame,
       operation: OperationType,
       outputPath: String,
-      parallelism: Int,
       apiType: ApiType,
       saveMode: SaveMode,
       opts: Map[String, String],
@@ -442,13 +414,6 @@ class IncrementalLoader(
       updateColumns: Seq[String],
       mergeMode: MergeMode,
       tableName: String): Unit = {
-    // TODO cleanup
-    val repartitionedDF = if (nonPartitioned) {
-      df.repartition(parallelism)
-    } else {
-      df.repartition(parallelism, col("partition"))
-    }
-
     apiType match {
       case ApiType.SparkDatasourceApi =>
         require(
@@ -469,7 +434,7 @@ class IncrementalLoader(
 
         val targetOpts = opts ++ partitionOpts ++ Map(HoodieWriteConfig.TBL_NAME.key() -> "hudi")
 
-        repartitionedDF.write
+        df.write
           .format("hudi")
           .options(targetOpts)
           .option(DataSourceWriteOptions.OPERATION.key, operation.toString)
@@ -477,7 +442,7 @@ class IncrementalLoader(
           .save(s"$outputPath/$tableName")
 
       case ApiType.SparkSqlApi =>
-        repartitionedDF.createOrReplaceTempView("source")
+        df.createOrReplaceTempView("source")
         val escapedTableName = escapeTableName(tableName)
 
         operation match {
@@ -535,7 +500,6 @@ object IncrementalLoader {
         dataLoader.doWrites(
           config.inputPath,
           config.outputPath,
-          parallelism = config.parallelism,
           format = StorageFormat.fromString(config.format),
           operation = OperationType.fromString(config.operationType),
           opts = config.options,

@@ -23,7 +23,7 @@
 
   <groupId>ai.onehouse</groupId>
   <artifactId>lake-loader</artifactId>
-  <version>0.1</version>
+  <version>0.2</version>
   <packaging>jar</packaging>
   <licenses>
     <license>

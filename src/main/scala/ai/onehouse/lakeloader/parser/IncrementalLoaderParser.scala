@@ -35,10 +35,6 @@ object IncrementalLoaderParser {
       .action((x, c) => c.copy(outputPath = x))
       .text("Output path")
 
-    opt[Int]("parallelism")
-      .action((x, c) => c.copy(parallelism = x))
-      .text("Parallelism. Default: 100")
-
     opt[StorageFormat]("format")
       .action((x, c) => c.copy(format = x.asString))
       .text(
