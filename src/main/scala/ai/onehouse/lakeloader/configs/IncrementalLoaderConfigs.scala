@@ -113,7 +113,6 @@ case class LoadConfig(
     numberOfRounds: Int = 10,
     inputPath: String = "",
     outputPath: String = "",
-    parallelism: Int = 100,
     format: String = "hudi",
     operationType: String = "upsert",
     options: Map[String, String] = Map.empty,

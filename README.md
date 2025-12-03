@@ -104,7 +104,6 @@ new IncrementalLoader(spark: SparkSession, numRounds: Int)
 def doWrites(
   inputPath: String,
   outputPath: String,
-  parallelism: Int = 100,
   format: StorageFormat = StorageFormat.Hudi,
   operation: OperationType = OperationType.Upsert,
   opts: Map[String, String] = Map.empty,
@@ -131,7 +130,6 @@ spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> [option
 | inputPath             | `-i`, `--input-path`                   | String             | *required*    | Input path where change data was generated                |
 | outputPath            | `-o`, `--output-path`                  | String             | *required*    | Output path where table data will be written              |
 | numRounds             | `--number-rounds`                      | Int                | 10            | Number of rounds of incremental data to load              |
-| parallelism           | `--parallelism`                        | Int                | 100           | Spark parallelism level for processing                    |
 | format                | `--format`                             | StorageFormat      | hudi          | Table format: `iceberg`, `delta`, `hudi`, `parquet`       |
 | operation             | `--operation-type`                     | OperationType      | upsert        | Write operation: `upsert`, `insert`                       |
 | opts                  | `--options`                            | Map[String,String] | {}            | Format-specific options (e.g., `key1=value1 key2=value2`) |
@@ -355,7 +353,6 @@ val loader = new IncrementalLoader(spark, numRounds = numRounds)
 var opts = Map("write.parquet.compression-codec" -> "snappy")
 loader.doWrites(inputPath,
   targetPath,
-  parallelism = 1000,
   format = StorageFormat.Delta,
   operation = OperationType.Upsert,
   opts = opts,
@@ -378,7 +375,6 @@ val loader = new IncrementalLoader(spark, numRounds = numRounds)
 var opts = Map("write.parquet.compression-codec" -> "snappy")
 loader.doWrites(inputPath,
   targetPath,
-  parallelism = 1000,
   format = StorageFormat.Delta,
   operation = OperationType.Upsert,
   opts = opts,
@@ -402,7 +398,6 @@ val loader = new IncrementalLoader(spark, numRounds = numRounds)
 var opts = Map("write.parquet.compression-codec" -> "snappy")
 loader.doWrites(inputPath,
   targetPath,
-  parallelism = 1000,
   format = StorageFormat.Delta,
   operation = OperationType.Insert,
   opts = opts,
