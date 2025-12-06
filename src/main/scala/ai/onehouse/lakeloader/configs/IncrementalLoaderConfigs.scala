@@ -119,6 +119,7 @@ case class LoadConfig(
     format: String = "hudi",
     operationType: String = "upsert",
     options: Map[String, String] = Map.empty,
+    incrOptions: Map[String, String] = Map.empty,
     nonPartitioned: Boolean = false,
     experimentId: String = StringUtils.generateRandomString(10),
     startRound: Int = 0,

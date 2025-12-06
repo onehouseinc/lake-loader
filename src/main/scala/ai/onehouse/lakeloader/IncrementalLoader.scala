@@ -141,6 +141,7 @@ class IncrementalLoader(
       operation: OperationType = OperationType.Upsert,
       apiType: ApiType = ApiType.SparkDatasourceApi,
       opts: Map[String, String] = Map(),
+      incrOpts: Map[String, String] = Map(),
       cacheInput: Boolean = false,
       overwrite: Boolean = true,
       nonPartitioned: Boolean = false,
@@ -172,7 +173,7 @@ class IncrementalLoader(
       }
 
       val targetOperation = if (roundNo == 0) {
-        OperationType.BulkInsert
+        OperationType.Insert
       } else {
         operation
       }
@@ -193,6 +194,12 @@ class IncrementalLoader(
         tryCreateTable(inputDF.schema, outputPath, format, opts, nonPartitioned, experimentId)
       }
 
+      val targetOpts = if (roundNo == 0) {
+        opts
+      } else {
+        incrOpts
+      }
+
       allRoundTimes += doWriteRound(
         inputDF,
         outputPath,
@@ -201,7 +208,7 @@ class IncrementalLoader(
         apiType,
         saveMode,
         targetOperation,
-        opts,
+        targetOpts,
         nonPartitioned,
         mergeConditionColumns,
         updateColumns,
@@ -296,11 +303,12 @@ class IncrementalLoader(
       mergeMode: MergeMode,
       tableName: String): Unit = {
     val escapedTableName = escapeTableName(tableName)
-    val repartitionedDF = if (nonPartitioned) {
+    val repartitionedDF = df
+    /*val repartitionedDF = if (nonPartitioned) {
       df.repartition(parallelism)
     } else {
       df.repartition(parallelism, col("partition"))
-    }
+    }*/
     repartitionedDF.createOrReplaceTempView(s"source")
 
     operation match {
@@ -473,7 +481,7 @@ class IncrementalLoader(
         repartitionedDF.write
           .format("hudi")
           .options(targetOpts)
-          .option(DataSourceWriteOptions.OPERATION.key, operation.toString)
+          .option(DataSourceWriteOptions.OPERATION.key, operation.asString)
           .mode(saveMode)
           .save(s"$outputPath/$tableName")
 
@@ -540,6 +548,7 @@ object IncrementalLoader {
           format = StorageFormat.fromString(config.format),
           operation = OperationType.fromString(config.operationType),
           opts = config.options,
+          incrOpts = config.incrOptions,
           nonPartitioned = config.nonPartitioned,
           experimentId = config.experimentId,
           startRound = config.startRound,
