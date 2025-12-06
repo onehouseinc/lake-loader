@@ -56,6 +56,10 @@ object IncrementalLoaderParser {
       .action((x, c) => c.copy(options = x))
       .text("Options. Default: empty map")
 
+    opt[Map[String, String]]("incr-options")
+      .action((x, c) => c.copy(options = x))
+      .text("Incr Options. Default: empty map")
+
     opt[Boolean]("non-partitioned")
       .action((x, c) => c.copy(nonPartitioned = x))
       .text("Non partitioned. Default: false")
