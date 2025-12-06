@@ -142,6 +142,7 @@ class IncrementalLoader(
       initialOperation: OperationType = OperationType.Upsert,
       apiType: ApiType = ApiType.SparkDatasourceApi,
       opts: Map[String, String] = Map(),
+      incrOpts: Map[String, String] = Map(),
       cacheInput: Boolean = false,
       overwrite: Boolean = true,
       nonPartitioned: Boolean = false,
@@ -194,6 +195,12 @@ class IncrementalLoader(
         tryCreateTable(inputDF.schema, outputPath, format, opts, nonPartitioned, experimentId)
       }
 
+      val targetOpts = if (roundNo == 0) {
+        opts
+      } else {
+        incrOpts
+      }
+
       allRoundTimes += doWriteRound(
         inputDF,
         outputPath,
@@ -202,7 +209,7 @@ class IncrementalLoader(
         apiType,
         saveMode,
         targetOperation,
-        opts,
+        targetOpts,
         nonPartitioned,
         mergeConditionColumns,
         updateColumns,
@@ -543,6 +550,7 @@ object IncrementalLoader {
           operation = OperationType.fromString(config.operationType),
           initialOperation = OperationType.fromString(config.initialOperationType),
           opts = config.options,
+          incrOpts = config.incrOptions,
           nonPartitioned = config.nonPartitioned,
           experimentId = config.experimentId,
           startRound = config.startRound,
