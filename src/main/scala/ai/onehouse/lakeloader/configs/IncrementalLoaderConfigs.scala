@@ -32,7 +32,7 @@ object OperationType {
     case _ => throw new IllegalArgumentException(s"Invalid OperationType: $s")
   }
 
-  def values(): List[String] = List(Upsert.asString, Insert.asString, BulkInsert.asString)
+  def values(): List[String] = List(Upsert.asString, Insert.asString)
 
   implicit val operationTypeRead: scopt.Read[OperationType] = scopt.Read.reads { s =>
     try {
