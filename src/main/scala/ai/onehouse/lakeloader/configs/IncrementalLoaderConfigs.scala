@@ -118,6 +118,7 @@ case class LoadConfig(
     parallelism: Int = 100,
     format: String = "hudi",
     operationType: String = "upsert",
+    initialOperationType: String = "upsert",
     options: Map[String, String] = Map.empty,
     nonPartitioned: Boolean = false,
     experimentId: String = StringUtils.generateRandomString(10),

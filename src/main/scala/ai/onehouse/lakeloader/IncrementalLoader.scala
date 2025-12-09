@@ -139,6 +139,7 @@ class IncrementalLoader(
       parallelism: Int = 100,
       format: StorageFormat = Parquet,
       operation: OperationType = OperationType.Upsert,
+      initialOperation: OperationType = OperationType.Upsert,
       apiType: ApiType = ApiType.SparkDatasourceApi,
       opts: Map[String, String] = Map(),
       cacheInput: Boolean = false,
@@ -172,7 +173,7 @@ class IncrementalLoader(
       }
 
       val targetOperation = if (roundNo == 0) {
-        OperationType.Insert
+        initialOperation
       } else {
         operation
       }
@@ -540,6 +541,7 @@ object IncrementalLoader {
           parallelism = config.parallelism,
           format = StorageFormat.fromString(config.format),
           operation = OperationType.fromString(config.operationType),
+          initialOperation = OperationType.fromString(config.initialOperationType),
           opts = config.options,
           nonPartitioned = config.nonPartitioned,
           experimentId = config.experimentId,

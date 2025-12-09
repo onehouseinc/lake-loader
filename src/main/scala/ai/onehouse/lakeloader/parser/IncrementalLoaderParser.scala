@@ -49,6 +49,11 @@ object IncrementalLoaderParser {
       .text(
         s"Write operation type. Options: ${OperationType.values().mkString(", ")}. Default: upsert")
 
+    opt[OperationType]("initial-operation-type")
+      .action((x, c) => c.copy(initialOperationType = x.asString))
+      .text(
+        s"Initial Write operation type. Options: ${OperationType.values().mkString(", ")}. Default: upsert")
+
     opt[Map[String, String]]("options")
       .action((x, c) => c.copy(options = x))
       .text("Options. Default: empty map")
