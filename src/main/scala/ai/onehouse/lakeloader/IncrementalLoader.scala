@@ -451,8 +451,7 @@ class IncrementalLoader(
         val escapedTableName = escapeTableName(tableName)
 
         operation match {
-          case OperationType.Insert =>
-          case OperationType.BulkInsert =>
+          case OperationType.Insert | OperationType.BulkInsert =>
             val insertIntoTableSql =
               s"""
                  |INSERT INTO $escapedTableName
