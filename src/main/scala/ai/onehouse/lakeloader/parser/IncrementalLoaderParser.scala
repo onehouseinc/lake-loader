@@ -48,7 +48,7 @@ object IncrementalLoaderParser {
     opt[ApiType]("api-type")
       .action((x, c) => c.copy(apiType = x.asString))
       .text(
-        s"Api type. Options: ${ApiType.values().mkString(", ")}. Default: spark-datasource")
+        s"Api type, to be used with Hudi format only. Options: ${ApiType.values().mkString(", ")}. Default: spark-datasource")
 
     opt[Map[String, String]]("options")
       .action((x, c) => c.copy(options = x))

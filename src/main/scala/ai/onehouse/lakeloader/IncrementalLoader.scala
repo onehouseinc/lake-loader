@@ -491,6 +491,14 @@ object IncrementalLoader {
   def main(args: Array[String]): Unit = {
     IncrementalLoaderParser.parser.parse(args, LoadConfig()) match {
       case Some(config) =>
+        val format = StorageFormat.fromString(config.format)
+        val apiType = ApiType.fromString(config.apiType)
+
+        if (apiType == ApiType.SparkSqlApi && format != StorageFormat.Hudi) {
+          System.err.println(s"Error: --api-type spark-sql is only supported with --format hudi. Got: --format ${config.format}")
+          sys.exit(1)
+        }
+
         val spark = SparkSession.builder
           .appName("lake-loader incremental data loader")
           .getOrCreate()
@@ -500,9 +508,9 @@ object IncrementalLoader {
         dataLoader.doWrites(
           config.inputPath,
           config.outputPath,
-          format = StorageFormat.fromString(config.format),
+          format = format,
           operation = OperationType.fromString(config.operationType),
-          apiType = ApiType.fromString(config.apiType),
+          apiType = apiType,
           opts = config.options,
           nonPartitioned = config.nonPartitioned,
           experimentId = config.experimentId,

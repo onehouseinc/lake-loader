@@ -146,6 +146,7 @@ spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> [option
 
 **Notes**:
 * CLI uses `--additional-merge-condition-columns` while Scala API uses `mergeConditionColumns` for the full merge condition list. Default merge columns are `[key]` for non-partitioned or `[key, partition]` for partitioned tables.
+* The `--api-type` option is only supported with `--format hudi`. Using `spark-sql` with other formats will result in an error.
 
 ## Usage Examples
 
