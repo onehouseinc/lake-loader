@@ -171,7 +171,12 @@ class IncrementalLoader(
       }
 
       val targetOperation = if (roundNo == 0) {
-        OperationType.Insert
+        if (format == Hudi) {
+          // Use the bulk insert operation for Hudi's first batch
+          OperationType.BulkInsert
+        } else {
+          OperationType.Insert
+        }
       } else {
         operation
       }
@@ -437,7 +442,7 @@ class IncrementalLoader(
         df.write
           .format("hudi")
           .options(targetOpts)
-          .option(DataSourceWriteOptions.OPERATION.key, operation.toString)
+          .option(DataSourceWriteOptions.OPERATION.key, operation.asString)
           .mode(saveMode)
           .save(s"$outputPath/$tableName")
 
@@ -447,6 +452,7 @@ class IncrementalLoader(
 
         operation match {
           case OperationType.Insert =>
+          case OperationType.BulkInsert =>
             val insertIntoTableSql =
               s"""
                  |INSERT INTO $escapedTableName
