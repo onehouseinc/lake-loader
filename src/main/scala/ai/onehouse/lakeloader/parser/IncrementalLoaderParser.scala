@@ -14,7 +14,7 @@
 
 package ai.onehouse.lakeloader.parser
 
-import ai.onehouse.lakeloader.configs.{LoadConfig, MergeMode, OperationType, StorageFormat}
+import ai.onehouse.lakeloader.configs.{ApiType, LoadConfig, MergeMode, OperationType, StorageFormat}
 
 object IncrementalLoaderParser {
 
@@ -44,6 +44,11 @@ object IncrementalLoaderParser {
       .action((x, c) => c.copy(operationType = x.asString))
       .text(
         s"Write operation type. Options: ${OperationType.values().mkString(", ")}. Default: upsert")
+
+    opt[ApiType]("api-type")
+      .action((x, c) => c.copy(apiType = x.asString))
+      .text(
+        s"Api type. Options: ${ApiType.values().mkString(", ")}. Default: spark-datasource")
 
     opt[Map[String, String]]("options")
       .action((x, c) => c.copy(options = x))

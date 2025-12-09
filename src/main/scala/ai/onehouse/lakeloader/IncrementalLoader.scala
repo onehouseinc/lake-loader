@@ -424,7 +424,7 @@ class IncrementalLoader(
           "Hudi sparkDataSourceApi does not support partial column updates.")
         require(
           mergeConditionColumns == Seq("key", "partition"),
-          "Hudi sparkDataSourceApi does not support custom merge conditions.")
+          s"Hudi sparkDataSourceApi does not support custom merge conditions: $mergeConditionColumns")
 
         val partitionOpts = if (nonPartitioned) {
           Map.empty[String, String]
@@ -502,6 +502,7 @@ object IncrementalLoader {
           config.outputPath,
           format = StorageFormat.fromString(config.format),
           operation = OperationType.fromString(config.operationType),
+          apiType = ApiType.fromString(config.apiType),
           opts = config.options,
           nonPartitioned = config.nonPartitioned,
           experimentId = config.experimentId,
