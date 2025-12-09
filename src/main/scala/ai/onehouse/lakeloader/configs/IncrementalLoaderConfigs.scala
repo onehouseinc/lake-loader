@@ -28,7 +28,6 @@ object OperationType {
   def fromString(s: String): OperationType = s match {
     case "upsert" => Upsert
     case "insert" => Insert
-    case "bulk_insert" => BulkInsert
     case _ => throw new IllegalArgumentException(s"Invalid OperationType: $s")
   }
 
