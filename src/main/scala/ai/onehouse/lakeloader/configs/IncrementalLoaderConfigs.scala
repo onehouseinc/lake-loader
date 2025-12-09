@@ -23,6 +23,7 @@ sealed trait OperationType {
 object OperationType {
   case object Upsert extends OperationType { val asString = "upsert" }
   case object Insert extends OperationType { val asString = "insert" }
+  case object BulkInsert extends OperationType { val asString = "bulk_insert" }
 
   def fromString(s: String): OperationType = s match {
     case "upsert" => Upsert
