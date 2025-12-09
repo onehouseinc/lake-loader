@@ -424,7 +424,7 @@ class IncrementalLoader(
           "Hudi sparkDataSourceApi does not support partial column updates.")
         require(
           mergeConditionColumns == Seq("key", "partition"),
-          "Hudi sparkDataSourceApi does not support custom merge conditions.")
+          s"Hudi sparkDataSourceApi does not support custom merge conditions: $mergeConditionColumns")
 
         val partitionOpts = if (nonPartitioned) {
           Map.empty[String, String]
@@ -491,6 +491,14 @@ object IncrementalLoader {
   def main(args: Array[String]): Unit = {
     IncrementalLoaderParser.parser.parse(args, LoadConfig()) match {
       case Some(config) =>
+        val format = StorageFormat.fromString(config.format)
+        val apiType = ApiType.fromString(config.apiType)
+
+        if (apiType == ApiType.SparkSqlApi && format != StorageFormat.Hudi) {
+          System.err.println(s"Error: --api-type spark-sql is only supported with --format hudi. Got: --format ${config.format}")
+          sys.exit(1)
+        }
+
         val spark = SparkSession.builder
           .appName("lake-loader incremental data loader")
           .getOrCreate()
@@ -500,8 +508,9 @@ object IncrementalLoader {
         dataLoader.doWrites(
           config.inputPath,
           config.outputPath,
-          format = StorageFormat.fromString(config.format),
+          format = format,
           operation = OperationType.fromString(config.operationType),
+          apiType = apiType,
           opts = config.options,
           nonPartitioned = config.nonPartitioned,
           experimentId = config.experimentId,

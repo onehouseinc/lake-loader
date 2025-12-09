@@ -106,6 +106,7 @@ def doWrites(
   outputPath: String,
   format: StorageFormat = StorageFormat.Hudi,
   operation: OperationType = OperationType.Upsert,
+  apiType: ApiType = ApiType.SparkDatasourceApi,
   opts: Map[String, String] = Map.empty,
   nonPartitioned: Boolean = false,
   experimentId: String = generateRandomString(10),
@@ -125,25 +126,27 @@ spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> [option
 
 ### Parameter Reference
 
-| Parameter             | CLI Flag                               | Type               | Default       | Description                                               |
-|-----------------------|----------------------------------------|--------------------|---------------|-----------------------------------------------------------|
-| inputPath             | `-i`, `--input-path`                   | String             | *required*    | Input path where change data was generated                |
-| outputPath            | `-o`, `--output-path`                  | String             | *required*    | Output path where table data will be written              |
-| numRounds             | `--number-rounds`                      | Int                | 10            | Number of rounds of incremental data to load              |
-| format                | `--format`                             | StorageFormat      | hudi          | Table format: `iceberg`, `delta`, `hudi`, `parquet`       |
-| operation             | `--operation-type`                     | OperationType      | upsert        | Write operation: `upsert`, `insert`                       |
-| opts                  | `--options`                            | Map[String,String] | {}            | Format-specific options (e.g., `key1=value1 key2=value2`) |
-| nonPartitioned        | `--non-partitioned`                    | Boolean            | false         | Whether table is non-partitioned                          |
-| experimentId          | `-e`, `--experiment-id`                | String             | *random*      | Experiment identifier for tracking                        |
-| startRound            | `--start-round`                        | Int                | 0             | Starting round for loading (for resuming)                 |
-| catalog               | `--catalog`                            | String             | spark_catalog | Catalog name for table registration                       |
-| database              | `--database`                           | String             | default       | Database name for table registration                      |
-| mergeConditionColumns | `--additional-merge-condition-columns` | Seq[String]        | []            | Additional merge condition columns beyond defaults        |
-| mergeMode             | `--merge-mode`                         | MergeMode          | update-insert | Merge mode: `update-insert`, `delete-insert`              |
-| updateColumns         | `--update-columns`                     | Seq[String]        | []            | Specific columns to update (empty = all columns)          |
+| Parameter             | CLI Flag                               | Type               | Default          | Description                                               |
+|-----------------------|----------------------------------------|--------------------|------------------|-----------------------------------------------------------|
+| inputPath             | `-i`, `--input-path`                   | String             | *required*       | Input path where change data was generated                |
+| outputPath            | `-o`, `--output-path`                  | String             | *required*       | Output path where table data will be written              |
+| numRounds             | `--number-rounds`                      | Int                | 10               | Number of rounds of incremental data to load              |
+| format                | `--format`                             | StorageFormat      | hudi             | Table format: `iceberg`, `delta`, `hudi`, `parquet`       |
+| operation             | `--operation-type`                     | OperationType      | upsert           | Write operation: `upsert`, `insert`                       |
+| apiType               | `--api-type`                           | ApiType            | spark-datasource | API type: `spark-datasource`, `spark-sql`                 |
+| opts                  | `--options`                            | Map[String,String] | {}               | Format-specific options (e.g., `key1=value1 key2=value2`) |
+| nonPartitioned        | `--non-partitioned`                    | Boolean            | false            | Whether table is non-partitioned                          |
+| experimentId          | `-e`, `--experiment-id`                | String             | *random*         | Experiment identifier for tracking                        |
+| startRound            | `--start-round`                        | Int                | 0                | Starting round for loading (for resuming)                 |
+| catalog               | `--catalog`                            | String             | spark_catalog    | Catalog name for table registration                       |
+| database              | `--database`                           | String             | default          | Database name for table registration                      |
+| mergeConditionColumns | `--additional-merge-condition-columns` | Seq[String]        | []               | Additional merge condition columns beyond defaults        |
+| mergeMode             | `--merge-mode`                         | MergeMode          | update-insert    | Merge mode: `update-insert`, `delete-insert`              |
+| updateColumns         | `--update-columns`                     | Seq[String]        | []               | Specific columns to update (empty = all columns)          |
 
 **Notes**:
 * CLI uses `--additional-merge-condition-columns` while Scala API uses `mergeConditionColumns` for the full merge condition list. Default merge columns are `[key]` for non-partitioned or `[key, partition]` for partitioned tables.
+* The `--api-type` option is only supported with `--format hudi`. Using `spark-sql` with other formats will result in an error.
 
 ## Usage Examples
 

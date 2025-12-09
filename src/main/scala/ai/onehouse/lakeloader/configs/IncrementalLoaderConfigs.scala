@@ -107,6 +107,25 @@ sealed trait ApiType { def asString: String }
 object ApiType {
   case object SparkDatasourceApi extends ApiType { val asString = "spark-datasource" }
   case object SparkSqlApi extends ApiType { val asString = "spark-sql" }
+
+  def fromString(s : String): ApiType = s match {
+    case "spark-datasource" => SparkDatasourceApi
+    case "spark-sql" => SparkSqlApi
+    case _ => throw new IllegalArgumentException(s"Invalid ApiType: $s")
+  }
+
+  def values(): List[String] =
+    List(SparkDatasourceApi.asString, SparkSqlApi.asString)
+
+  implicit val apiTypeRead: scopt.Read[ApiType] = scopt.Read.reads { s =>
+    try {
+      ApiType.fromString(s)
+    } catch {
+      case _: IllegalArgumentException =>
+        throw new IllegalArgumentException(
+          s"Invalid api Type: $s. Valid values: ${ApiType.values().mkString(", ")}")
+    }
+  }
 }
 
 case class LoadConfig(
@@ -115,6 +134,7 @@ case class LoadConfig(
     outputPath: String = "",
     format: String = "hudi",
     operationType: String = "upsert",
+    apiType: String = "spark-datasource",
     options: Map[String, String] = Map.empty,
     nonPartitioned: Boolean = false,
     experimentId: String = StringUtils.generateRandomString(10),
