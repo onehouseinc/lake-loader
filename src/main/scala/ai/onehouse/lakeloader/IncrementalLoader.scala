@@ -138,6 +138,7 @@ class IncrementalLoader(
       outputPath: String,
       format: StorageFormat = Parquet,
       operation: OperationType = OperationType.Upsert,
+      initialOperation: OperationType = OperationType.Upsert,
       apiType: ApiType = ApiType.SparkDatasourceApi,
       opts: Map[String, String] = Map(),
       cacheInput: Boolean = false,
@@ -419,16 +420,6 @@ class IncrementalLoader(
       updateColumns: Seq[String],
       mergeMode: MergeMode,
       tableName: String): Unit = {
-<<<<<<< HEAD
-=======
-    // TODO cleanup
-    val repartitionedDF = df
-    /*val repartitionedDF = if (nonPartitioned) {
-      df.repartition(parallelism)
-    } else {
-      df.repartition(parallelism, col("partition"))
-    }*/
->>>>>>> 9beb780 (Fixing repartition to align for both iceberg and hudi)
 
     apiType match {
       case ApiType.SparkDatasourceApi =>
@@ -523,6 +514,7 @@ object IncrementalLoader {
           format = format,
           operation = OperationType.fromString(config.operationType),
           apiType = apiType,
+          initialOperation = OperationType.fromString(config.initialOperationType),
           opts = config.options,
           nonPartitioned = config.nonPartitioned,
           experimentId = config.experimentId,

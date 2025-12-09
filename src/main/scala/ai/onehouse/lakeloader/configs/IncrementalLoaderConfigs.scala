@@ -137,6 +137,7 @@ case class LoadConfig(
     format: String = "hudi",
     operationType: String = "upsert",
     apiType: String = "spark-datasource",
+    initialOperationType: String = "upsert",
     options: Map[String, String] = Map.empty,
     nonPartitioned: Boolean = false,
     experimentId: String = StringUtils.generateRandomString(10),

@@ -44,12 +44,14 @@ object IncrementalLoaderParser {
       .action((x, c) => c.copy(operationType = x.asString))
       .text(
         s"Write operation type. Options: ${OperationType.values().mkString(", ")}. Default: upsert")
-
     opt[ApiType]("api-type")
       .action((x, c) => c.copy(apiType = x.asString))
       .text(
         s"Api type, to be used with Hudi format only. Options: ${ApiType.values().mkString(", ")}. Default: spark-datasource")
-
+    opt[OperationType]("initial-operation-type")
+      .action((x, c) => c.copy(initialOperationType = x.asString))
+      .text(
+        s"Initial Write operation type. Options: ${OperationType.values().mkString(", ")}. Default: upsert")
     opt[Map[String, String]]("options")
       .action((x, c) => c.copy(options = x))
       .text("Options. Default: empty map")
