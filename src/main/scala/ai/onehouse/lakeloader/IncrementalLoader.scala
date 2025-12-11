@@ -53,12 +53,15 @@ class IncrementalLoader(
       case Iceberg => genIcebergTableName(scenarioId)
     }
     val escapedTableName = escapeTableName(tableName)
-    spark.sql(
+
+    val updateQuery = (
       s"""
          | ALTER TABLE $escapedTableName
          | SET TBLPROPERTIES ('write.distribution-mode' = 'hash')
          |""".stripMargin
     )
+    println(updateQuery)
+    spark.sql(updateQuery)
 }
 
   private def tryCreateTable(
