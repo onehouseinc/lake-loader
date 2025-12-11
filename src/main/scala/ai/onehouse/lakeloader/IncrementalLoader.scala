@@ -317,7 +317,7 @@ class IncrementalLoader(
   }
 
   private def writeToIceberg(
-      df: DataFrame,
+      rawDf: DataFrame,
       operation: OperationType,
       nonPartitioned: Boolean,
       mergeConditionColumns: Seq[String],
@@ -325,6 +325,11 @@ class IncrementalLoader(
       mergeMode: MergeMode,
       tableName: String): Unit = {
     val escapedTableName = escapeTableName(tableName)
+    val df = if (nonPartitioned) {
+      rawDf
+    } else {
+      rawDf.sort("partition","key")
+    }
     df.createOrReplaceTempView(s"source")
 
     operation match {
@@ -367,7 +372,7 @@ class IncrementalLoader(
   }
 
   private def writeToDelta(
-      df: DataFrame,
+      rawDf: DataFrame,
       operation: OperationType,
       outputPath: String,
       saveMode: SaveMode,
@@ -380,6 +385,12 @@ class IncrementalLoader(
     val targetPath = s"$outputPath/$tableName"
     operation match {
       case OperationType.Insert | OperationType.BulkInsert =>
+        val df = if (nonPartitioned) {
+          rawDf
+        } else {
+          rawDf.sort("partition","key")
+        }
+
         val writer = df.write.format("delta")
         // Enable deletion vectors for merge-on-read mode
         val optionedWriter = writeMode match {
@@ -388,17 +399,13 @@ class IncrementalLoader(
           case WriteMode.CopyOnWrite =>
             writer
         }
-        val partitionedWriter = if (nonPartitioned) {
-          optionedWriter
-        } else {
-          optionedWriter.partitionBy(PARTITION_PATH_FIELD_NAME)
-        }
 
-        partitionedWriter
+        optionedWriter
           .mode(saveMode)
           .save(targetPath)
 
       case OperationType.Upsert =>
+        val df = rawDf
         if (!DeltaTable.isDeltaTable(targetPath)) {
           throw new UnsupportedOperationException("Operation 'upsert' cannot be performed")
         } else {
@@ -436,7 +443,7 @@ class IncrementalLoader(
       saveMode: SaveMode): Unit = {
     operation match {
       case OperationType.Insert | OperationType.BulkInsert =>
-        df.write
+        df.sort("partition","key").write
           .format("parquet")
           .mode(saveMode)
           .save(s"$outputPath/parquet")
@@ -447,7 +454,7 @@ class IncrementalLoader(
   }
 
   private def writeToHudi(
-      df: DataFrame,
+      rawDf: DataFrame,
       operation: OperationType,
       outputPath: String,
       apiType: ApiType,
@@ -458,6 +465,11 @@ class IncrementalLoader(
       updateColumns: Seq[String],
       mergeMode: MergeMode,
       tableName: String): Unit = {
+    val df = if (nonPartitioned) {
+      rawDf
+    } else {
+      rawDf.sort("partition","key")
+    }
     apiType match {
       case ApiType.SparkDatasourceApi =>
         require(
@@ -568,6 +580,7 @@ object IncrementalLoader {
 
         val dataLoader =
           new IncrementalLoader(spark, config.numberOfRounds, config.catalog, config.database)
+
         dataLoader.doWrites(
           config.inputPath,
           config.outputPath,
