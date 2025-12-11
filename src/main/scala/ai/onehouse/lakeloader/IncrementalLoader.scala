@@ -195,7 +195,7 @@ class IncrementalLoader(
 
       // Some formats (like Iceberg) do require to create table in the Catalog before
       // you are able to ingest data into it
-      if (roundNo == 0 && (apiType == ApiType.SparkSqlApi || format == StorageFormat.Iceberg)) {
+      if (roundNo == startRound && (apiType == ApiType.SparkSqlApi || format == StorageFormat.Iceberg)) {
         tryCreateTable(inputDF.schema, outputPath, format, opts, nonPartitioned, experimentId)
       }
 
@@ -302,7 +302,12 @@ class IncrementalLoader(
       mergeMode: MergeMode,
       tableName: String): Unit = {
     val escapedTableName = escapeTableName(tableName)
-    df.createOrReplaceTempView(s"source")
+    val repartitionedDF = if (nonPartitioned) {
+      df
+    } else {
+      df.sort("partition","key")
+    }
+    repartitionedDF.createOrReplaceTempView(s"source")
 
     operation match {
       case OperationType.Insert =>
@@ -427,7 +432,13 @@ class IncrementalLoader(
       updateColumns: Seq[String],
       mergeMode: MergeMode,
       tableName: String): Unit = {
-
+    // TODO cleanup
+    val repartitionedDF = if (nonPartitioned) {
+      df
+    } else {
+      df.sort("partition","key")
+    }
+    repartitionedDF.createOrReplaceTempView("source")
     apiType match {
       case ApiType.SparkDatasourceApi =>
         require(
@@ -444,7 +455,7 @@ class IncrementalLoader(
 
         val targetOpts = opts ++ partitionOpts ++ Map(HoodieWriteConfig.TBL_NAME.key() -> "hudi")
 
-        df.write
+        repartitionedDF.write
           .format("hudi")
           .options(targetOpts)
           .option(DataSourceWriteOptions.OPERATION.key, operation.asString)
@@ -452,7 +463,7 @@ class IncrementalLoader(
           .save(s"$outputPath/$tableName")
 
       case ApiType.SparkSqlApi =>
-        df.createOrReplaceTempView("source")
+        repartitionedDF.createOrReplaceTempView("source")
         val escapedTableName = escapeTableName(tableName)
 
         operation match {
@@ -515,6 +526,13 @@ object IncrementalLoader {
 
         val dataLoader =
           new IncrementalLoader(spark, config.numberOfRounds, config.catalog, config.database)
+
+        val incrOptions = if (config.incrOptions.isEmpty) {
+          config.options
+        } else {
+          config.incrOptions
+        }
+
         dataLoader.doWrites(
           config.inputPath,
           config.outputPath,
@@ -523,7 +541,7 @@ object IncrementalLoader {
           apiType = apiType,
           initialOperation = OperationType.fromString(config.initialOperationType),
           opts = config.options,
-          incrOpts = config.incrOptions,
+          incrOpts = incrOptions,
           nonPartitioned = config.nonPartitioned,
           experimentId = config.experimentId,
           startRound = config.startRound,
