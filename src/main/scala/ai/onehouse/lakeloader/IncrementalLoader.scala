@@ -191,7 +191,7 @@ class IncrementalLoader(
 
       // Some formats (like Iceberg) do require to create table in the Catalog before
       // you are able to ingest data into it
-      if (roundNo == 0 && (apiType == ApiType.SparkSqlApi || format == StorageFormat.Iceberg)) {
+      if (roundNo == startRound && (apiType == ApiType.SparkSqlApi || format == StorageFormat.Iceberg)) {
         tryCreateTable(inputDF.schema, outputPath, format, opts, nonPartitioned, experimentId)
       }
 
@@ -304,7 +304,12 @@ class IncrementalLoader(
       mergeMode: MergeMode,
       tableName: String): Unit = {
     val escapedTableName = escapeTableName(tableName)
-    val repartitionedDF = df
+    val repartitionedDF = if (nonPartitioned) {
+      df
+    } else {
+      df.sort("partition","key")
+    }
+
     /*val repartitionedDF = if (nonPartitioned) {
       df.repartition(parallelism)
     } else {
@@ -365,6 +370,7 @@ class IncrementalLoader(
     val targetPath = s"$outputPath/$tableName"
     operation match {
       case OperationType.Insert =>
+        // to fix.
         val repartitionedDF = if (nonPartitioned) {
           df.repartition(parallelism)
         } else {
@@ -452,7 +458,11 @@ class IncrementalLoader(
       mergeMode: MergeMode,
       tableName: String): Unit = {
     // TODO cleanup
-    val repartitionedDF = df
+    val repartitionedDF = if (nonPartitioned) {
+      df
+    } else {
+      df.sort("partition","key")
+    }
     /*val repartitionedDF = if (nonPartitioned) {
       df.repartition(parallelism)
     } else {
@@ -542,6 +552,13 @@ object IncrementalLoader {
 
         val dataLoader =
           new IncrementalLoader(spark, config.numberOfRounds, config.catalog, config.database)
+
+        val incrOptions = if (config.incrOptions.isEmpty) {
+          config.options
+        } else {
+          config.incrOptions
+        }
+
         dataLoader.doWrites(
           config.inputPath,
           config.outputPath,
@@ -550,7 +567,7 @@ object IncrementalLoader {
           operation = OperationType.fromString(config.operationType),
           initialOperation = OperationType.fromString(config.initialOperationType),
           opts = config.options,
-          incrOpts = config.incrOptions,
+          incrOpts = incrOptions,
           nonPartitioned = config.nonPartitioned,
           experimentId = config.experimentId,
           startRound = config.startRound,

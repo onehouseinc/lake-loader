@@ -52,14 +52,14 @@ object IncrementalLoaderParser {
     opt[OperationType]("initial-operation-type")
       .action((x, c) => c.copy(initialOperationType = x.asString))
       .text(
-        s"Initial Write operation type. Options: ${OperationType.values().mkString(", ")}. Default: upsert")
+        s"Initial Write operation type. Options: ${OperationType.values().mkString(", ")}. Default: insert")
 
     opt[Map[String, String]]("options")
       .action((x, c) => c.copy(options = x))
       .text("Options. Default: empty map")
 
     opt[Map[String, String]]("incr-options")
-      .action((x, c) => c.copy(options = x))
+      .action((x, c) => c.copy(incrOptions = x))
       .text("Incr Options. Default: empty map")
 
     opt[Boolean]("non-partitioned")

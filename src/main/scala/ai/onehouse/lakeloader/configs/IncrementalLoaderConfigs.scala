@@ -118,7 +118,7 @@ case class LoadConfig(
     parallelism: Int = 100,
     format: String = "hudi",
     operationType: String = "upsert",
-    initialOperationType: String = "upsert",
+    initialOperationType: String = "insert",
     options: Map[String, String] = Map.empty,
     incrOptions: Map[String, String] = Map.empty,
     nonPartitioned: Boolean = false,
