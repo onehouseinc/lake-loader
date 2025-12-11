@@ -56,7 +56,7 @@ class IncrementalLoader(
     spark.sql(
       s"""
          | ALTER TABLE $escapedTableName
-         | SET TBLPROPERTIES ('write.operation.mode' = 'hash')
+         | SET TBLPROPERTIES ('write.distribution-mode' = 'hash')
          |""".stripMargin
     )
 }
