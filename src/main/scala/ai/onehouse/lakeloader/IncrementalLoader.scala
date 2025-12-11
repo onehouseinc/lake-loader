@@ -40,6 +40,27 @@ class IncrementalLoader(
     val database: String = "default")
     extends Serializable {
 
+  private def updateIcebergTable(
+                              schema: StructType,
+                              outputPath: String,
+                              format: StorageFormat,
+                              opts: Map[String, String],
+                              nonPartitioned: Boolean,
+                              scenarioId: String): Unit = {
+
+    val tableName = format match {
+      case Hudi => genHudiTableName(scenarioId)
+      case Iceberg => genIcebergTableName(scenarioId)
+    }
+    val escapedTableName = escapeTableName(tableName)
+    spark.sql(
+      s"""
+         | ALTER TABLE $escapedTableName
+         | SET TBLPROPERTIES ('write.operation.mode' = 'hash')
+         |""".stripMargin
+    )
+}
+
   private def tryCreateTable(
       schema: StructType,
       outputPath: String,
@@ -179,26 +200,41 @@ class IncrementalLoader(
         operation
       }
 
-      val inputDF =
+      val rawDF =
         spark.read
           .format(ChangeDataGenerator.DEFAULT_DATA_GEN_FORMAT)
           .load(s"$inputPath/$roundNo")
 
       if (cacheInput) {
-        inputDF.cache()
-        println(s"Cached ${inputDF.count()} records from $inputPath")
+        rawDF.cache()
+        println(s"Cached ${rawDF.count()} records from $inputPath")
       }
 
       // Some formats (like Iceberg) do require to create table in the Catalog before
       // you are able to ingest data into it
       if (roundNo == startRound && (apiType == ApiType.SparkSqlApi || format == StorageFormat.Iceberg)) {
-        tryCreateTable(inputDF.schema, outputPath, format, opts, nonPartitioned, experimentId)
+        tryCreateTable(rawDF.schema, outputPath, format, opts, nonPartitioned, experimentId)
+      }
+
+      // Want to reset the write distribution mode to hash after first commit.
+      if (roundNo == 1 && format == StorageFormat.Iceberg && !nonPartitioned) {
+        updateIcebergTable(rawDF.schema, outputPath, format, opts, nonPartitioned, experimentId)
+      }
+
+      val inputDF = if (nonPartitioned || roundNo != 0) {
+        rawDF
+      } else {
+        rawDF.sort("partition","key")
       }
 
       val targetOpts = if (roundNo == 0) {
         opts
       } else {
         incrOpts
+      }
+
+      if(roundNo > startRound && format == StorageFormat.Iceberg){
+        spark.sql(s"")
       }
 
       allRoundTimes += doWriteRound(
@@ -304,18 +340,13 @@ class IncrementalLoader(
       mergeMode: MergeMode,
       tableName: String): Unit = {
     val escapedTableName = escapeTableName(tableName)
-    val repartitionedDF = if (nonPartitioned) {
-      df
-    } else {
-      df.sort("partition","key")
-    }
 
     /*val repartitionedDF = if (nonPartitioned) {
       df.repartition(parallelism)
     } else {
       df.repartition(parallelism, col("partition"))
     }*/
-    repartitionedDF.createOrReplaceTempView(s"source")
+    df.createOrReplaceTempView(s"source")
 
     operation match {
       case OperationType.Insert =>
@@ -458,11 +489,7 @@ class IncrementalLoader(
       mergeMode: MergeMode,
       tableName: String): Unit = {
     // TODO cleanup
-    val repartitionedDF = if (nonPartitioned) {
-      df
-    } else {
-      df.sort("partition","key")
-    }
+    val repartitionedDF = df
     /*val repartitionedDF = if (nonPartitioned) {
       df.repartition(parallelism)
     } else {
