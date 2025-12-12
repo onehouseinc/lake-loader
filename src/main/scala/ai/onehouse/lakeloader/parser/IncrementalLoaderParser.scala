@@ -92,6 +92,10 @@ object IncrementalLoaderParser {
     opt[Seq[String]]("update-columns")
       .action((x, c) => c.copy(updateColumns = x))
       .text("Columns to update during merge operations. If not specified, all columns will be updated. Default: all columns")
+
+    opt[Boolean]("iceberg-spj-enable")
+      .action((x, c) => c.copy(icebergSpjEnable = x))
+      .text("Non partitioned. Default: false")
   }
 
   /**
