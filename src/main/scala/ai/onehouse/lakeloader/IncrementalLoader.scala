@@ -54,13 +54,8 @@ class IncrementalLoader(
     }
     val escapedTableName = escapeTableName(tableName)
 
-    val updateQuery = (
-      s"""
-         | ALTER TABLE $escapedTableName
-         | SET TBLPROPERTIES ('write.distribution-mode' = 'hash')
-         |""".stripMargin
-    )
-    println(updateQuery)
+    val updateQuery = s"ALTER TABLE $escapedTableName SET TBLPROPERTIES ('write.distribution-mode' = 'hash')"
+    println("Running update query to reset write.distribution-mode - " + updateQuery)
     spark.sql(updateQuery)
 }
 
@@ -238,10 +233,6 @@ class IncrementalLoader(
         opts
       } else {
         incrOpts
-      }
-
-      if(roundNo > startRound && format == StorageFormat.Iceberg){
-        spark.sql(s"")
       }
 
       allRoundTimes += doWriteRound(
