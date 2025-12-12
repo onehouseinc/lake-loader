@@ -55,9 +55,41 @@ class IncrementalLoader(
     val escapedTableName = escapeTableName(tableName)
 
     val updateQuery = s"ALTER TABLE $escapedTableName SET TBLPROPERTIES ('write.distribution-mode' = 'hash')"
-    println("Running update query to reset write.distribution-mode - " + updateQuery)
-    spark.sql(updateQuery)
+    executeSparkSql(spark, updateQuery)
 }
+
+  private def createIcebergTableForSpj(
+                              schema: StructType,
+                              outputPath: String,
+                              opts: Map[String, String],
+                              nonPartitioned: Boolean,
+                              scenarioId: String,
+                              rawDF: DataFrame): DataFrame = {
+    println("Creating Table for SPJ")
+    val icebergRawTableNameForSpj = genIcebergRawTableNameForSpj(scenarioId)
+    val escapedIcebergRawTableNameForSpj = escapeTableName(icebergRawTableNameForSpj)
+    val targetPathForSpj = s"$outputPath/${icebergRawTableNameForSpj.replace('.', '/')}"
+    val serializedOpts = opts.map { case (k, v) => s"'$k'='$v'" }.mkString(",")
+    executeSparkSql(spark, s"DROP TABLE IF EXISTS $escapedIcebergRawTableNameForSpj PURGE")
+    val startMs = System.currentTimeMillis()
+    val icebergRawTableDDLForSpj = (s"""
+                                       |CREATE TABLE $escapedIcebergRawTableNameForSpj (
+                                       |  ${schema.toDDL}
+                                       |)
+                                       |USING ICEBERG
+                                       |${if (serializedOpts.nonEmpty) s"TBLPROPERTIES (\n  ${serializedOpts}\n)" else ""}
+                                       |LOCATION '$targetPathForSpj'
+                                       |${if (nonPartitioned) "" else "PARTITIONED BY (partition)"}
+                                       |""".stripMargin)
+    executeSparkSql(spark, icebergRawTableDDLForSpj)
+    rawDF.createOrReplaceTempView("rawIcebergDF")
+    val insertSQL = s"""INSERT INTO $escapedIcebergRawTableNameForSpj SELECT * FROM rawIcebergDF"""
+    val timeTaken = System.currentTimeMillis() - startMs
+    println(s"SPJ Raw Table Took ${timeTaken} ms.")
+    executeSparkSql(spark, insertSQL)
+    spark.sql(s"""SELECT * FROM $escapedIcebergRawTableNameForSpj""")
+
+  }
 
   private def tryCreateTable(
       schema: StructType,
@@ -152,6 +184,16 @@ class IncrementalLoader(
     }
   }
 
+  private def enableStoragePartitionedJoin(): Unit = {
+    println("Enabling Storage Partitioned Join for Iceberg MERGE.")
+    spark.conf.set("spark.sql.iceberg.distribution-mode", "none")
+    spark.conf.set("spark.sql.sources.v2.bucketing.enabled", "true")
+    spark.conf.set("spark.sql.iceberg.planning.preserve-data-grouping", "true")
+    spark.conf.set("spark.sql.sources.v2.bucketing.pushPartValues.enabled", "true")
+    spark.conf.set("spark.sql.requireAllClusterKeysForCoPartition", "false")
+    spark.conf.set("spark.sql.sources.v2.bucketing.partiallyClusteredDistribution.enabled", "true")
+  }
+
   def doWrites(
       inputPath: String,
       outputPath: String,
@@ -169,7 +211,8 @@ class IncrementalLoader(
       startRound: Int = 0,
       mergeConditionColumns: Seq[String] = Seq("key", "partition"),
       updateColumns: Seq[String] = Seq.empty,
-      mergeMode: MergeMode = MergeMode.UpdateInsert): Unit = {
+      mergeMode: MergeMode = MergeMode.UpdateInsert,
+      icebergSpjEnable: Boolean): Unit = {
     require(inputPath.nonEmpty, "Input path cannot be empty")
     require(outputPath.nonEmpty, "Output path cannot be empty")
     println(s"""
@@ -219,7 +262,7 @@ class IncrementalLoader(
         updateIcebergTable(rawDF.schema, outputPath, format, opts, nonPartitioned, experimentId)
       }
 
-      val inputDF = if (nonPartitioned || roundNo != 0) {
+      var inputDF = if (nonPartitioned || roundNo != 0) {
         rawDF
       } else {
         rawDF.sort("partition","key")
@@ -229,6 +272,11 @@ class IncrementalLoader(
         opts
       } else {
         incrOpts
+      }
+
+      if(roundNo > 0 && format == StorageFormat.Iceberg && icebergSpjEnable && !nonPartitioned){
+        enableStoragePartitionedJoin();
+        inputDF = createIcebergTableForSpj(rawDF.schema, outputPath, opts, nonPartitioned, experimentId, rawDF);
       }
 
       allRoundTimes += doWriteRound(
@@ -559,6 +607,9 @@ class IncrementalLoader(
   private def genIcebergTableName(experimentId: String): String =
     s"$catalog.$database.iceberg_$experimentId"
 
+  private def genIcebergRawTableNameForSpj(experimentId: String): String =
+    s"$catalog.$database.iceberg_${experimentId}_raw_spj"
+
   private def genHudiTableName(experimentId: String): String =
     s"$catalog.$database.hudi-$experimentId".replace("-", "_")
 }
@@ -594,7 +645,8 @@ object IncrementalLoader {
           startRound = config.startRound,
           mergeConditionColumns = IncrementalLoaderParser.getMergeConditionColumns(config),
           updateColumns = config.updateColumns,
-          mergeMode = MergeMode.fromString(config.mergeMode))
+          mergeMode = MergeMode.fromString(config.mergeMode),
+          icebergSpjEnable = config.icebergSpjEnable)
         spark.stop()
       case None =>
         // scopt already prints help

@@ -128,4 +128,5 @@ case class LoadConfig(
     database: String = "default",
     mergeMode: String = "update-insert",
     additionalMergeConditionColumns: Seq[String] = Seq.empty,
-    updateColumns: Seq[String] = Seq.empty)
+    updateColumns: Seq[String] = Seq.empty,
+    icebergSpjEnable: Boolean = false)
