@@ -117,6 +117,10 @@ object IncrementalLoaderParser {
     opt[Int]("max-retries")
       .action((x, c) => c.copy(maxRetries = x))
       .text("Maximum number of retries for failed ingestion batches. Default: 5")
+
+    opt[Boolean]("iceberg-spj-enable")
+      .action((x, c) => c.copy(icebergSpjEnable = x))
+      .text("Enables storage partition join with iceberg. Default: false")
   }
 
   /**
