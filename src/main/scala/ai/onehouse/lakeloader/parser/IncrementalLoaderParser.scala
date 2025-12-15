@@ -40,10 +40,15 @@ object IncrementalLoaderParser {
       .text(
         s"Format to load data into. Options: ${StorageFormat.values().mkString(", ")}. Default: hudi")
 
+    opt[OperationType]("initial-operation-type")
+      .action((x, c) => c.copy(initialOperationType = x.asString))
+      .text(
+        s"Write operation type for the first batch. Options: ${OperationType.values().mkString(", ")}. Default: bulk_insert")
+
     opt[OperationType]("operation-type")
       .action((x, c) => c.copy(operationType = x.asString))
       .text(
-        s"Write operation type. Options: ${OperationType.values().mkString(", ")}. Default: upsert")
+        s"Write operation type for subsequent batches. Options: ${OperationType.values().mkString(", ")}. Default: upsert")
 
     opt[ApiType]("api-type")
       .action((x, c) => c.copy(apiType = x.asString))

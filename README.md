@@ -105,6 +105,7 @@ def doWrites(
   inputPath: String,
   outputPath: String,
   format: StorageFormat = StorageFormat.Hudi,
+  initialOperation: OperationType = OperationType.BulkInsert,
   operation: OperationType = OperationType.Upsert,
   apiType: ApiType = ApiType.SparkDatasourceApi,
   opts: Map[String, String] = Map.empty,
@@ -132,7 +133,8 @@ spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> [option
 | outputPath            | `-o`, `--output-path`                  | String             | *required*       | Output path where table data will be written              |
 | numRounds             | `--number-rounds`                      | Int                | 10               | Number of rounds of incremental data to load              |
 | format                | `--format`                             | StorageFormat      | hudi             | Table format: `iceberg`, `delta`, `hudi`, `parquet`       |
-| operation             | `--operation-type`                     | OperationType      | upsert           | Write operation: `upsert`, `insert`                       |
+| initialOperation      | `--initial-operation-type`             | OperationType      | bulk_insert      | Write operation for first batch: `bulk_insert`, `upsert`, `insert` |
+| operation             | `--operation-type`                     | OperationType      | upsert           | Write operation for subsequent batches: `upsert`, `insert`|
 | apiType               | `--api-type`                           | ApiType            | spark-datasource | API type: `spark-datasource`, `spark-sql`                 |
 | opts                  | `--options`                            | Map[String,String] | {}               | Format-specific options (e.g., `key1=value1 key2=value2`) |
 | nonPartitioned        | `--non-partitioned`                    | Boolean            | false            | Whether table is non-partitioned                          |
