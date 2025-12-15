@@ -57,7 +57,7 @@ class IncrementalLoader(
 
     dropTableIfExists(format, escapedTableName, targetPath)
 
-    val serializedOpts = opts.map { case (k, v) => s"'$k'='$v'" }.mkString(",")
+    val serializedOpts = serializeOptionsForSql(opts)
     val createTableSql = format match {
       case StorageFormat.Hudi =>
         s"""
@@ -450,6 +450,13 @@ class IncrementalLoader(
         df.createOrReplaceTempView("source")
         val escapedTableName = escapeTableName(tableName)
 
+        // Apply custom write options via ALTER TABLE SET TBLPROPERTIES
+        if (opts.nonEmpty) {
+          executeSparkSql(
+            spark,
+            s"ALTER TABLE $escapedTableName SET TBLPROPERTIES (${serializeOptionsForSql(opts)})")
+        }
+
         operation match {
           case OperationType.Insert | OperationType.BulkInsert =>
             val insertIntoTableSql =
@@ -482,8 +489,11 @@ class IncrementalLoader(
     }
   }
 
-  private def escapeTableName(tableName: String) =
+  private def escapeTableName(tableName: String): String =
     tableName.split('.').map(np => s"`$np`").mkString(".")
+
+  private def serializeOptionsForSql(opts: Map[String, String]): String =
+    opts.map { case (k, v) => s"'$k'='$v'" }.mkString(",")
 
   private def genIcebergTableName(experimentId: String): String =
     s"$catalog.$database.iceberg_$experimentId"
