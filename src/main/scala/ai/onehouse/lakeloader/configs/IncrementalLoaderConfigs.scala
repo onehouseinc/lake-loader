@@ -148,4 +148,5 @@ case class LoadConfig(
     mergeMode: String = "update-insert",
     additionalMergeConditionColumns: Seq[String] = Seq.empty,
     updateColumns: Seq[String] = Seq.empty,
-    icebergSpjEnable: Boolean = false)
+    icebergSpjEnable: Boolean = false,
+    usePartitionInMITCondition: Boolean = true)

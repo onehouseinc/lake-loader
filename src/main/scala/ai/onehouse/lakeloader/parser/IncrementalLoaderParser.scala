@@ -96,13 +96,17 @@ object IncrementalLoaderParser {
     opt[Boolean]("iceberg-spj-enable")
       .action((x, c) => c.copy(icebergSpjEnable = x))
       .text("Non partitioned. Default: false")
+
+    opt[Boolean]("use-partition-in-mit-condition")
+      .action((x, c) => c.copy(usePartitionInMITCondition = x))
+      .text("Non partitioned. Default: false")
   }
 
   /**
    * Get columns to be used for merge condition (ON clause).
    */
   def getMergeConditionColumns(config: LoadConfig): Seq[String] = {
-    val baseColumns = if (config.nonPartitioned) {
+    val baseColumns = if (config.nonPartitioned || !config.usePartitionInMITCondition) {
       Seq("key")
     } else {
       Seq("key", "partition")
