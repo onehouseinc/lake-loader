@@ -73,7 +73,7 @@ class IncrementalLoader(
     executeSparkSql(spark, s"DROP TABLE IF EXISTS $escapedIcebergRawTableNameForSpj PURGE")
     val startMs = System.currentTimeMillis()
     val icebergRawTableDDLForSpj = (s"""
-                                       |CREATE TABLE $escapedIcebergRawTableNameForSpj (
+                                       |CREATE TABLE  $escapedIcebergRawTableNameForSpj (
                                        |  ${schema.toDDL}
                                        |)
                                        |USING ICEBERG
@@ -97,7 +97,8 @@ class IncrementalLoader(
       format: StorageFormat,
       opts: Map[String, String],
       nonPartitioned: Boolean,
-      scenarioId: String): Unit = {
+      scenarioId: String,
+      roundNum: Int): Unit = {
 
     val tableName = format match {
       case Hudi => genHudiTableName(scenarioId)
@@ -106,7 +107,7 @@ class IncrementalLoader(
     val escapedTableName = escapeTableName(tableName)
     val targetPath = s"$outputPath/${tableName.replace('.', '/')}"
 
-    dropTableIfExists(format, escapedTableName, targetPath)
+    dropTableIfExists(format, escapedTableName, targetPath, roundNum)
 
     val serializedOpts = opts.map { case (k, v) => s"'$k'='$v'" }.mkString(",")
     val createTableSql = format match {
@@ -128,7 +129,7 @@ class IncrementalLoader(
 
       case StorageFormat.Iceberg =>
         s"""
-           |CREATE TABLE $escapedTableName (
+           |CREATE TABLE IF NOT EXISTS $escapedTableName (
            |  ${schema.toDDL}
            |)
            |USING ICEBERG
@@ -147,13 +148,15 @@ class IncrementalLoader(
   private def dropTableIfExists(
       format: StorageFormat,
       escapedTableName: String,
-      targetPathStr: String): Unit = {
+      targetPathStr: String,
+      roundNum: Int): Unit = {
     format match {
       case StorageFormat.Iceberg =>
         // Since Iceberg persists its catalog information w/in the manifest it's sufficient to just
         // drop the table from SQL
-        executeSparkSql(spark, s"DROP TABLE IF EXISTS $escapedTableName PURGE")
-
+        if(roundNum == 0){
+          executeSparkSql(spark, s"DROP TABLE IF EXISTS $escapedTableName PURGE")
+        }
       case StorageFormat.Hudi =>
         executeSparkSql(spark, s"DROP TABLE IF EXISTS $escapedTableName PURGE")
 
@@ -254,7 +257,7 @@ class IncrementalLoader(
       // Some formats (like Iceberg) do require to create table in the Catalog before
       // you are able to ingest data into it
       if (roundNo == startRound && (apiType == ApiType.SparkSqlApi || format == StorageFormat.Iceberg)) {
-        tryCreateTable(rawDF.schema, outputPath, format, opts, nonPartitioned, experimentId)
+        tryCreateTable(rawDF.schema, outputPath, format, opts, nonPartitioned, experimentId, roundNo)
       }
 
       // Want to reset the write distribution mode to hash after first commit.
@@ -274,11 +277,6 @@ class IncrementalLoader(
         incrOpts
       }
 
-      if(roundNo > 0 && format == StorageFormat.Iceberg && icebergSpjEnable && !nonPartitioned){
-        enableStoragePartitionedJoin();
-        inputDF = createIcebergTableForSpj(rawDF.schema, outputPath, opts, nonPartitioned, experimentId, rawDF);
-      }
-
       allRoundTimes += doWriteRound(
         inputDF,
         outputPath,
@@ -292,7 +290,9 @@ class IncrementalLoader(
         mergeConditionColumns,
         updateColumns,
         mergeMode,
-        experimentId)
+        experimentId,
+        roundNo,
+        icebergSpjEnable)
 
       inputDF.unpersist()
     })
@@ -318,7 +318,9 @@ class IncrementalLoader(
       mergeConditionColumns: Seq[String],
       updateColumns: Seq[String],
       mergeMode: MergeMode,
-      experimentId: String): Long = {
+      experimentId: String,
+      roundNo: Int,
+      icebergSpjEnable: Boolean): Long = {
     val startMs = System.currentTimeMillis()
 
     format match {
@@ -354,8 +356,15 @@ class IncrementalLoader(
         writeToParquet(inputDF, operation, outputPath, parallelism, saveMode, nonPartitioned)
       case Iceberg =>
         val tableName = genIcebergTableName(experimentId)
+
+        val icebergDF = if(roundNo > 0 && icebergSpjEnable && !nonPartitioned){
+          enableStoragePartitionedJoin();
+          createIcebergTableForSpj(inputDF.schema, outputPath, opts, nonPartitioned, experimentId, inputDF);
+        }else{
+          inputDF
+        }
         writeToIceberg(
-          inputDF,
+          icebergDF,
           operation,
           nonPartitioned,
           parallelism,
