@@ -458,17 +458,11 @@ object ChangeDataGenerator {
     }
   }
 
-  private def genParallelRDD(
+  private[lakeloader] def genParallelRDD(
       spark: SparkSession,
       targetParallelism: Int,
       start: Long,
       end: Long): RDD[Long] = {
-    val partitionSize = (end - start) / targetParallelism
-    spark.sparkContext
-      .parallelize(0 to targetParallelism, targetParallelism)
-      .mapPartitions { it =>
-        val partitionStart = it.next() * partitionSize
-        (partitionStart to partitionStart + partitionSize).iterator
-      }
+    spark.sparkContext.range(start, end, numSlices = targetParallelism)
   }
 }
