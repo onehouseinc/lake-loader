@@ -55,9 +55,13 @@ object IncrementalLoaderParser {
       .text(
         s"Api type, to be used with Hudi format only. Options: ${ApiType.values().mkString(", ")}. Default: spark-datasource")
 
+    opt[Map[String, String]]("initial-options")
+      .action((x, c) => c.copy(initialOptions = x))
+      .text("Options for first batch. Default: empty map")
+
     opt[Map[String, String]]("options")
       .action((x, c) => c.copy(options = x))
-      .text("Options. Default: empty map")
+      .text("Options for second and subsequent batches. Default: empty map")
 
     opt[Boolean]("non-partitioned")
       .action((x, c) => c.copy(nonPartitioned = x))

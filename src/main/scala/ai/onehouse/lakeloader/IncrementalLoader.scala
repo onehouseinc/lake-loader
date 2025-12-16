@@ -58,7 +58,6 @@ class IncrementalLoader(
 
     dropTableIfExists(format, escapedTableName, targetPath)
 
-    val serializedOpts = serializeOptionsForSql(opts)
     val createTableSql = format match {
       case StorageFormat.Hudi =>
         s"""
@@ -69,7 +68,7 @@ class IncrementalLoader(
            |TBLPROPERTIES (
            |  type = '${writeMode.asHudiTableType}',
            |  primaryKey = '${opts(KeyGeneratorOptions.RECORDKEY_FIELD_NAME.key)}',
-           |  ${serializedOpts}
+           |  ${serializeOptionsForSql(opts)}
            |)
            |LOCATION '$targetPath'
            |${if (nonPartitioned) "" else "PARTITIONED BY (partition)"}
@@ -107,7 +106,7 @@ class IncrementalLoader(
 
     // Combine all properties, with user options taking precedence
     val allProps = writeModeProps ++ userOpts
-    allProps.map { case (k, v) => s"'$k'='$v'" }.mkString(",")
+    serializeOptionsForSql(allProps)
   }
 
   private def dropTableIfExists(
@@ -151,22 +150,23 @@ class IncrementalLoader(
   }
 
   def doWrites(
-      inputPath: String,
-      outputPath: String,
-      format: StorageFormat = Parquet,
-      initialOperation: OperationType = OperationType.BulkInsert,
-      operation: OperationType = OperationType.Upsert,
-      apiType: ApiType = ApiType.SparkDatasourceApi,
-      opts: Map[String, String] = Map(),
-      cacheInput: Boolean = false,
-      overwrite: Boolean = true,
-      nonPartitioned: Boolean = false,
-      experimentId: String = StringUtils.generateRandomString(10),
-      startRound: Int = 0,
-      mergeConditionColumns: Seq[String] = Seq("key", "partition"),
-      updateColumns: Seq[String] = Seq.empty,
-      mergeMode: MergeMode = MergeMode.UpdateInsert,
-      writeMode: WriteMode = WriteMode.CopyOnWrite): Unit = {
+                inputPath: String,
+                outputPath: String,
+                format: StorageFormat = Parquet,
+                initialOperation: OperationType = OperationType.BulkInsert,
+                operation: OperationType = OperationType.Upsert,
+                apiType: ApiType = ApiType.SparkDatasourceApi,
+                initialOpts: Map[String, String] = Map(),
+                opts: Map[String, String] = Map(),
+                cacheInput: Boolean = false,
+                overwrite: Boolean = true,
+                nonPartitioned: Boolean = false,
+                experimentId: String = StringUtils.generateRandomString(10),
+                startRound: Int = 0,
+                mergeConditionColumns: Seq[String] = Seq("key", "partition"),
+                updateColumns: Seq[String] = Seq.empty,
+                mergeMode: MergeMode = MergeMode.UpdateInsert,
+                writeMode: WriteMode = WriteMode.CopyOnWrite): Unit = {
     require(inputPath.nonEmpty, "Input path cannot be empty")
     require(outputPath.nonEmpty, "Output path cannot be empty")
     println(s"""
@@ -212,10 +212,16 @@ class IncrementalLoader(
           inputDF.schema,
           outputPath,
           format,
-          opts,
+          initialOpts,
           nonPartitioned,
           experimentId,
           writeMode)
+      }
+
+      val targetOpts = if (roundNo == 0) {
+        initialOpts
+      } else {
+        opts
       }
 
       allRoundTimes += doWriteRound(
@@ -225,7 +231,7 @@ class IncrementalLoader(
         apiType,
         saveMode,
         targetOperation,
-        opts,
+        targetOpts,
         nonPartitioned,
         mergeConditionColumns,
         updateColumns,
@@ -563,6 +569,7 @@ object IncrementalLoader {
           initialOperation = OperationType.fromString(config.initialOperationType),
           operation = OperationType.fromString(config.operationType),
           apiType = apiType,
+          initialOpts = config.initialOptions,
           opts = config.options,
           nonPartitioned = config.nonPartitioned,
           experimentId = config.experimentId,
