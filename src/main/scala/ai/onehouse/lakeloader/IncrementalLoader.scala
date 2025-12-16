@@ -455,6 +455,10 @@ class IncrementalLoader(
 
         operation match {
           case OperationType.Insert | OperationType.BulkInsert =>
+            executeSparkSql(
+              spark,
+              s"ALTER TABLE $escapedTableName SET TBLPROPERTIES ("
+                + s"hoodie.spark.sql.insert.into.operation=${operation.asString})")
             val insertIntoTableSql =
               s"""
                  |INSERT INTO $escapedTableName
