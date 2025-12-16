@@ -67,9 +67,8 @@ class IncrementalLoader(
            |)
            |USING HUDI
            |TBLPROPERTIES (
-           |  tableType = '${writeMode.asHudiTableType}',
+           |  type = '${writeMode.asHudiTableType}',
            |  primaryKey = '${opts(KeyGeneratorOptions.RECORDKEY_FIELD_NAME.key)}',
-           |  preCombineField = '${opts(HoodieWriteConfig.PRECOMBINE_FIELD_NAME.key)}',
            |  ${serializedOpts}
            |)
            |LOCATION '$targetPath'
