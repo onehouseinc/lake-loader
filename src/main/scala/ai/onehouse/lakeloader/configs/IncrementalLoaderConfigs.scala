@@ -28,10 +28,11 @@ object OperationType {
   def fromString(s: String): OperationType = s match {
     case "upsert" => Upsert
     case "insert" => Insert
+    case "bulk_insert" => BulkInsert
     case _ => throw new IllegalArgumentException(s"Invalid OperationType: $s")
   }
 
-  def values(): List[String] = List(Upsert.asString, Insert.asString)
+  def values(): List[String] = List(Upsert.asString, Insert.asString, BulkInsert.asString)
 
   implicit val operationTypeRead: scopt.Read[OperationType] = scopt.Read.reads { s =>
     try {
@@ -134,6 +135,7 @@ case class LoadConfig(
     inputPath: String = "",
     outputPath: String = "",
     format: String = "hudi",
+    initialOperationType: String = "bulk_insert",
     operationType: String = "upsert",
     apiType: String = "spark-datasource",
     options: Map[String, String] = Map.empty,

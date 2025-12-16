@@ -137,6 +137,7 @@ class IncrementalLoader(
       inputPath: String,
       outputPath: String,
       format: StorageFormat = Parquet,
+      initialOperation: OperationType = OperationType.BulkInsert,
       operation: OperationType = OperationType.Upsert,
       apiType: ApiType = ApiType.SparkDatasourceApi,
       opts: Map[String, String] = Map(),
@@ -171,12 +172,7 @@ class IncrementalLoader(
       }
 
       val targetOperation = if (roundNo == 0) {
-        if (format == Hudi) {
-          // Use the bulk insert operation for Hudi's first batch
-          OperationType.BulkInsert
-        } else {
-          OperationType.Insert
-        }
+        initialOperation
       } else {
         operation
       }
@@ -297,7 +293,7 @@ class IncrementalLoader(
     df.createOrReplaceTempView(s"source")
 
     operation match {
-      case OperationType.Insert =>
+      case OperationType.Insert | OperationType.BulkInsert =>
         // NOTE: Iceberg requires ordering of the dataset when being inserted into partitioned tables
         val insertIntoTableSql =
           s"""
@@ -347,7 +343,7 @@ class IncrementalLoader(
       tableName: String): Unit = {
     val targetPath = s"$outputPath/$tableName"
     operation match {
-      case OperationType.Insert =>
+      case OperationType.Insert | OperationType.BulkInsert =>
         val writer = df.write.format("delta")
         val partitionedWriter = if (nonPartitioned) {
           writer
@@ -396,7 +392,7 @@ class IncrementalLoader(
       outputPath: String,
       saveMode: SaveMode): Unit = {
     operation match {
-      case OperationType.Insert =>
+      case OperationType.Insert | OperationType.BulkInsert =>
         df.write
           .format("parquet")
           .mode(saveMode)
@@ -459,6 +455,10 @@ class IncrementalLoader(
 
         operation match {
           case OperationType.Insert | OperationType.BulkInsert =>
+            executeSparkSql(
+              spark,
+              s"ALTER TABLE $escapedTableName SET TBLPROPERTIES ("
+                + s"'hoodie.spark.sql.insert.into.operation'='${operation.asString}')")
             val insertIntoTableSql =
               s"""
                  |INSERT INTO $escapedTableName
@@ -524,6 +524,7 @@ object IncrementalLoader {
           config.inputPath,
           config.outputPath,
           format = format,
+          initialOperation = OperationType.fromString(config.initialOperationType),
           operation = OperationType.fromString(config.operationType),
           apiType = apiType,
           opts = config.options,
