@@ -14,7 +14,7 @@
 
 package ai.onehouse.lakeloader.parser
 
-import ai.onehouse.lakeloader.configs.{ApiType, LoadConfig, MergeMode, OperationType, StorageFormat}
+import ai.onehouse.lakeloader.configs.{ApiType, LoadConfig, MergeMode, OperationType, StorageFormat, WriteMode}
 
 object IncrementalLoaderParser {
 
@@ -91,6 +91,11 @@ object IncrementalLoaderParser {
     opt[Seq[String]]("update-columns")
       .action((x, c) => c.copy(updateColumns = x))
       .text("Columns to update during merge operations. If not specified, all columns will be updated. Default: all columns")
+
+    opt[WriteMode]("write-mode")
+      .action((x, c) => c.copy(writeMode = x.asString))
+      .text(
+        s"Write mode for updates/deletes. Applies to Hudi (table type), Delta (deletion vectors), and Iceberg. Options: ${WriteMode.values().mkString(", ")}. Default: copy-on-write")
   }
 
   /**

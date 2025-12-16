@@ -130,6 +130,40 @@ object ApiType {
   }
 }
 
+sealed trait WriteMode {
+  def asString: String
+  def asHudiTableType: String
+}
+
+object WriteMode {
+  case object CopyOnWrite extends WriteMode {
+    val asString = "copy-on-write"
+    val asHudiTableType = "cow"
+  }
+  case object MergeOnRead extends WriteMode {
+    val asString = "merge-on-read"
+    val asHudiTableType = "mor"
+  }
+
+  def fromString(s: String): WriteMode = s match {
+    case "copy-on-write" => CopyOnWrite
+    case "merge-on-read" => MergeOnRead
+    case _ => throw new IllegalArgumentException(s"Invalid WriteMode: $s")
+  }
+
+  def values(): List[String] = List(CopyOnWrite.asString, MergeOnRead.asString)
+
+  implicit val writeModeRead: scopt.Read[WriteMode] = scopt.Read.reads { s =>
+    try {
+      WriteMode.fromString(s)
+    } catch {
+      case _: IllegalArgumentException =>
+        throw new IllegalArgumentException(
+          s"Invalid write mode: $s. Valid values: ${WriteMode.values().mkString(", ")}")
+    }
+  }
+}
+
 case class LoadConfig(
     numberOfRounds: Int = 10,
     inputPath: String = "",
@@ -146,4 +180,5 @@ case class LoadConfig(
     database: String = "default",
     mergeMode: String = "update-insert",
     additionalMergeConditionColumns: Seq[String] = Seq.empty,
-    updateColumns: Seq[String] = Seq.empty)
+    updateColumns: Seq[String] = Seq.empty,
+    writeMode: String = "copy-on-write")

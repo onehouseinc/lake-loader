@@ -116,7 +116,8 @@ def doWrites(
   database: String = "default",
   mergeConditionColumns: Seq[String] = Seq.empty,
   mergeMode: MergeMode = MergeMode.UpdateInsert,
-  updateColumns: Seq[String] = Seq.empty
+  updateColumns: Seq[String] = Seq.empty,
+  writeMode: WriteMode = WriteMode.CopyOnWrite
 )
 ```
 
@@ -145,10 +146,15 @@ spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> [option
 | mergeConditionColumns | `--additional-merge-condition-columns` | Seq[String]        | []               | Additional merge condition columns beyond defaults        |
 | mergeMode             | `--merge-mode`                         | MergeMode          | update-insert    | Merge mode: `update-insert`, `delete-insert`              |
 | updateColumns         | `--update-columns`                     | Seq[String]        | []               | Specific columns to update (empty = all columns)          |
+| writeMode             | `--write-mode`                         | WriteMode          | copy-on-write    | Write mode: `copy-on-write`, `merge-on-read`              |
 
 **Notes**:
 * CLI uses `--additional-merge-condition-columns` while Scala API uses `mergeConditionColumns` for the full merge condition list. Default merge columns are `[key]` for non-partitioned or `[key, partition]` for partitioned tables.
 * The `--api-type` option is only supported with `--format hudi`. Using `spark-sql` with other formats will result in an error.
+* **Write Mode**: The `--write-mode` option controls the table type and update/delete behavior for each format:
+  * **Hudi**: Sets table type to `cow` (Copy-On-Write) or `mor` (Merge-On-Read)
+  * **Delta**: Enables deletion vectors when set to `merge-on-read`
+  * **Iceberg**: Sets `write.delete.mode`, `write.update.mode`, and `write.merge.mode` properties
 
 ## Usage Examples
 

@@ -15,7 +15,7 @@ package ai.onehouse.lakeloader
  */
 
 import ai.onehouse.lakeloader.configs.MergeMode.{DeleteInsert, UpdateInsert}
-import ai.onehouse.lakeloader.configs.{ApiType, LoadConfig, MergeMode, OperationType, StorageFormat}
+import ai.onehouse.lakeloader.configs.{ApiType, LoadConfig, MergeMode, OperationType, StorageFormat, WriteMode}
 import ai.onehouse.lakeloader.configs.StorageFormat.{Delta, Hudi, Iceberg, Parquet}
 import ai.onehouse.lakeloader.parser.IncrementalLoaderParser
 import org.apache.hadoop.fs.Path
@@ -46,7 +46,8 @@ class IncrementalLoader(
       format: StorageFormat,
       opts: Map[String, String],
       nonPartitioned: Boolean,
-      scenarioId: String): Unit = {
+      scenarioId: String,
+      writeMode: WriteMode = WriteMode.CopyOnWrite): Unit = {
 
     val tableName = format match {
       case Hudi => genHudiTableName(scenarioId)
@@ -66,7 +67,7 @@ class IncrementalLoader(
            |)
            |USING HUDI
            |TBLPROPERTIES (
-           |  tableType = 'cow',
+           |  tableType = '${writeMode.asHudiTableType}',
            |  primaryKey = '${opts(KeyGeneratorOptions.RECORDKEY_FIELD_NAME.key)}',
            |  preCombineField = '${opts(HoodieWriteConfig.PRECOMBINE_FIELD_NAME.key)}',
            |  ${serializedOpts}
@@ -76,12 +77,13 @@ class IncrementalLoader(
            |""".stripMargin
 
       case StorageFormat.Iceberg =>
+        val icebergTableProps = buildIcebergTableProperties(opts, writeMode)
         s"""
            |CREATE TABLE $escapedTableName (
            |  ${schema.toDDL}
            |)
            |USING ICEBERG
-           |${if (serializedOpts.nonEmpty) s"TBLPROPERTIES (\n  ${serializedOpts}\n)" else ""}
+           |${if (icebergTableProps.nonEmpty) s"TBLPROPERTIES (\n  $icebergTableProps\n)" else ""}
            |LOCATION '$targetPath'
            |${if (nonPartitioned) "" else "PARTITIONED BY (partition)"}
            |""".stripMargin
@@ -91,6 +93,22 @@ class IncrementalLoader(
     }
 
     executeSparkSql(spark, createTableSql)
+  }
+
+  private def buildIcebergTableProperties(
+      userOpts: Map[String, String],
+      writeMode: WriteMode): String = {
+    val writeModeStr = writeMode.asString
+
+    // Build base write mode properties (deletion file type uses Iceberg defaults based on table spec version)
+    val writeModeProps = Map(
+      "write.delete.mode" -> writeModeStr,
+      "write.update.mode" -> writeModeStr,
+      "write.merge.mode" -> writeModeStr)
+
+    // Combine all properties, with user options taking precedence
+    val allProps = writeModeProps ++ userOpts
+    allProps.map { case (k, v) => s"'$k'='$v'" }.mkString(",")
   }
 
   private def dropTableIfExists(
@@ -148,7 +166,8 @@ class IncrementalLoader(
       startRound: Int = 0,
       mergeConditionColumns: Seq[String] = Seq("key", "partition"),
       updateColumns: Seq[String] = Seq.empty,
-      mergeMode: MergeMode = MergeMode.UpdateInsert): Unit = {
+      mergeMode: MergeMode = MergeMode.UpdateInsert,
+      writeMode: WriteMode = WriteMode.CopyOnWrite): Unit = {
     require(inputPath.nonEmpty, "Input path cannot be empty")
     require(outputPath.nonEmpty, "Output path cannot be empty")
     println(s"""
@@ -187,10 +206,17 @@ class IncrementalLoader(
         println(s"Cached ${inputDF.count()} records from $inputPath")
       }
 
-      // Some formats (like Iceberg) do require to create table in the Catalog before
-      // you are able to ingest data into it
+      // Some formats (like Iceberg) require creating table in the Catalog
+      // before you are able to ingest data into it
       if (roundNo == 0 && (apiType == ApiType.SparkSqlApi || format == StorageFormat.Iceberg)) {
-        tryCreateTable(inputDF.schema, outputPath, format, opts, nonPartitioned, experimentId)
+        tryCreateTable(
+          inputDF.schema,
+          outputPath,
+          format,
+          opts,
+          nonPartitioned,
+          experimentId,
+          writeMode)
       }
 
       allRoundTimes += doWriteRound(
@@ -205,7 +231,8 @@ class IncrementalLoader(
         mergeConditionColumns,
         updateColumns,
         mergeMode,
-        experimentId)
+        experimentId,
+        writeMode)
 
       inputDF.unpersist()
     })
@@ -230,7 +257,8 @@ class IncrementalLoader(
       mergeConditionColumns: Seq[String],
       updateColumns: Seq[String],
       mergeMode: MergeMode,
-      experimentId: String): Long = {
+      experimentId: String,
+      writeMode: WriteMode = WriteMode.CopyOnWrite): Long = {
     val startMs = System.currentTimeMillis()
 
     format match {
@@ -259,7 +287,8 @@ class IncrementalLoader(
           mergeConditionColumns,
           updateColumns,
           mergeMode,
-          tableName)
+          tableName,
+          writeMode)
       case Parquet =>
         writeToParquet(inputDF, operation, outputPath, saveMode)
       case Iceberg =>
@@ -340,15 +369,23 @@ class IncrementalLoader(
       mergeConditionColumns: Seq[String],
       updateColumns: Seq[String],
       mergeMode: MergeMode,
-      tableName: String): Unit = {
+      tableName: String,
+      writeMode: WriteMode): Unit = {
     val targetPath = s"$outputPath/$tableName"
     operation match {
       case OperationType.Insert | OperationType.BulkInsert =>
         val writer = df.write.format("delta")
+        // Enable deletion vectors for merge-on-read mode
+        val optionedWriter = writeMode match {
+          case WriteMode.MergeOnRead =>
+            writer.option("delta.enableDeletionVectors", "true")
+          case WriteMode.CopyOnWrite =>
+            writer
+        }
         val partitionedWriter = if (nonPartitioned) {
-          writer
+          optionedWriter
         } else {
-          writer.partitionBy("partition")
+          optionedWriter.partitionBy("partition")
         }
 
         partitionedWriter
@@ -533,7 +570,8 @@ object IncrementalLoader {
           startRound = config.startRound,
           mergeConditionColumns = IncrementalLoaderParser.getMergeConditionColumns(config),
           updateColumns = config.updateColumns,
-          mergeMode = MergeMode.fromString(config.mergeMode))
+          mergeMode = MergeMode.fromString(config.mergeMode),
+          writeMode = WriteMode.fromString(config.writeMode))
         spark.stop()
       case None =>
         // scopt already prints help
