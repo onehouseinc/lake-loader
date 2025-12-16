@@ -108,6 +108,7 @@ def doWrites(
   initialOperation: OperationType = OperationType.BulkInsert,
   operation: OperationType = OperationType.Upsert,
   apiType: ApiType = ApiType.SparkDatasourceApi,
+  initialOpts: Map[String, String] = Map.empty,
   opts: Map[String, String] = Map.empty,
   nonPartitioned: Boolean = false,
   experimentId: String = generateRandomString(10),
@@ -137,7 +138,8 @@ spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> [option
 | initialOperation      | `--initial-operation-type`             | OperationType      | bulk_insert      | Write operation for first batch: `bulk_insert`, `upsert`, `insert` |
 | operation             | `--operation-type`                     | OperationType      | upsert           | Write operation for subsequent batches: `upsert`, `insert`|
 | apiType               | `--api-type`                           | ApiType            | spark-datasource | API type: `spark-datasource`, `spark-sql`                 |
-| opts                  | `--options`                            | Map[String,String] | {}               | Format-specific options (e.g., `key1=value1 key2=value2`) |
+| initialOpts           | `--initial-options`                    | Map[String,String] | {}               | Format-specific options for first batch (e.g., `key1=value1 key2=value2`) |
+| opts                  | `--options`                            | Map[String,String] | {}               | Options for subsequent batches                            |
 | nonPartitioned        | `--non-partitioned`                    | Boolean            | false            | Whether table is non-partitioned                          |
 | experimentId          | `-e`, `--experiment-id`                | String             | *random*         | Experiment identifier for tracking                        |
 | startRound            | `--start-round`                        | Int                | 0                | Starting round for loading (for resuming)                 |
