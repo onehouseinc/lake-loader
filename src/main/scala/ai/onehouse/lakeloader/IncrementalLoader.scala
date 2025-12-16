@@ -21,16 +21,17 @@ import ai.onehouse.lakeloader.parser.IncrementalLoaderParser
 import org.apache.hadoop.fs.Path
 import org.apache.hudi.DataSourceWriteOptions
 import org.apache.hudi.config.HoodieWriteConfig
-import org.apache.hudi.keygen.constant.KeyGeneratorOptions
-import org.apache.spark.sql.functions.col
+
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
 import ai.onehouse.lakeloader.utils.SparkUtils.executeSparkSql
 import ai.onehouse.lakeloader.utils.StringUtils
 import ai.onehouse.lakeloader.utils.StringUtils.lineSepBold
+import ai.onehouse.lakeloader.ChangeDataGenerator.{PARTITION_PATH_FIELD_NAME, RECORD_KEY_FIELD_NAME}
 import io.delta.tables.DeltaTable
 
 import java.io.Serializable
+
 import scala.collection.mutable.ListBuffer
 
 class IncrementalLoader(
@@ -67,7 +68,7 @@ class IncrementalLoader(
            |USING HUDI
            |TBLPROPERTIES (
            |  type = '${writeMode.asHudiTableType}',
-           |  primaryKey = '${opts(KeyGeneratorOptions.RECORDKEY_FIELD_NAME.key)}',
+           |  primaryKey = 'key',
            |  ${serializeOptionsForSql(opts)}
            |)
            |LOCATION '$targetPath'
@@ -163,7 +164,7 @@ class IncrementalLoader(
                 nonPartitioned: Boolean = false,
                 experimentId: String = StringUtils.generateRandomString(10),
                 startRound: Int = 0,
-                mergeConditionColumns: Seq[String] = Seq("key", "partition"),
+                mergeConditionColumns: Seq[String] = Seq(RECORD_KEY_FIELD_NAME, PARTITION_PATH_FIELD_NAME),
                 updateColumns: Seq[String] = Seq.empty,
                 mergeMode: MergeMode = MergeMode.UpdateInsert,
                 writeMode: WriteMode = WriteMode.CopyOnWrite): Unit = {
@@ -390,7 +391,7 @@ class IncrementalLoader(
         val partitionedWriter = if (nonPartitioned) {
           optionedWriter
         } else {
-          optionedWriter.partitionBy("partition")
+          optionedWriter.partitionBy(PARTITION_PATH_FIELD_NAME)
         }
 
         partitionedWriter
@@ -466,16 +467,21 @@ class IncrementalLoader(
           updateColumns.isEmpty,
           "Hudi sparkDataSourceApi does not support partial column updates.")
         require(
-          mergeConditionColumns == (if (nonPartitioned) Seq("key") else Seq("key", "partition")),
+          mergeConditionColumns == (if (nonPartitioned) {
+            Seq(RECORD_KEY_FIELD_NAME)
+          } else {
+            Seq(RECORD_KEY_FIELD_NAME, PARTITION_PATH_FIELD_NAME)
+          }),
           s"Hudi sparkDataSourceApi does not support custom merge conditions: $mergeConditionColumns")
 
-        val partitionOpts = if (nonPartitioned) {
-          Map.empty[String, String]
+        val recordKeyAndPartitionOpts = if (nonPartitioned) {
+          Map(DataSourceWriteOptions.RECORDKEY_FIELD.key() -> RECORD_KEY_FIELD_NAME)
         } else {
-          Map(DataSourceWriteOptions.PARTITIONPATH_FIELD.key() -> "partition")
+          Map(DataSourceWriteOptions.PARTITIONPATH_FIELD.key() -> PARTITION_PATH_FIELD_NAME,
+            DataSourceWriteOptions.RECORDKEY_FIELD.key() -> RECORD_KEY_FIELD_NAME)
         }
 
-        val targetOpts = opts ++ partitionOpts ++ Map(HoodieWriteConfig.TBL_NAME.key() -> "hudi")
+        val targetOpts = opts ++ recordKeyAndPartitionOpts ++ Map(HoodieWriteConfig.TBL_NAME.key() -> "hudi")
 
         df.write
           .format("hudi")
