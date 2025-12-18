@@ -41,15 +41,14 @@ class IncrementalLoader(
     val database: String = "default")
     extends Serializable {
 
-  private def tryCreateTable(
-      schema: StructType,
-      outputPath: String,
-      format: StorageFormat,
-      opts: Map[String, String],
-      nonPartitioned: Boolean,
-      scenarioId: String,
-      writeMode: WriteMode = WriteMode.CopyOnWrite,
-      roundNum: Int): Unit = {
+  private def tryCreateTable(schema: StructType,
+                             outputPath: String,
+                             format: StorageFormat,
+                             opts: Map[String, String],
+                             nonPartitioned: Boolean,
+                             scenarioId: String,
+                             writeMode: WriteMode = WriteMode.CopyOnWrite,
+                             roundNo: Int): Unit = {
 
     val tableName = format match {
       case Hudi => genHudiTableName(scenarioId)
@@ -58,7 +57,7 @@ class IncrementalLoader(
     val escapedTableName = escapeTableName(tableName)
     val targetPath = s"$outputPath/${tableName.replace('.', '/')}"
 
-    dropTableIfExists(format, escapedTableName, targetPath, roundNum)
+    dropTableIfExists(format, escapedTableName, targetPath, roundNo)
 
     val createTableSql = format match {
       case StorageFormat.Hudi =>
@@ -125,16 +124,15 @@ class IncrementalLoader(
     serializeOptionsForSql(allProps)
   }
 
-  private def dropTableIfExists(
-      format: StorageFormat,
-      escapedTableName: String,
-      targetPathStr: String,
-      roundNum: Int): Unit = {
+  private def dropTableIfExists(format: StorageFormat,
+                                escapedTableName: String,
+                                targetPathStr: String,
+                                roundNo: Int): Unit = {
     format match {
       case StorageFormat.Iceberg =>
         // Since Iceberg persists its catalog information w/in the manifest it's sufficient to just
         // drop the table from SQL
-        if(roundNum == 0) {
+        if (roundNo == 0) {
           executeSparkSql(spark, s"DROP TABLE IF EXISTS $escapedTableName PURGE")
         }
 
@@ -346,7 +344,8 @@ class IncrementalLoader(
     timeTaken
   }
 
-  private def writeToIceberg(df: DataFrame,
+  private def writeToIceberg(
+      df: DataFrame,
       operation: OperationType,
       nonPartitioned: Boolean,
       mergeConditionColumns: Seq[String],
@@ -395,7 +394,8 @@ class IncrementalLoader(
     }
   }
 
-  private def writeToDelta(df: DataFrame,
+  private def writeToDelta(
+      df: DataFrame,
       operation: OperationType,
       outputPath: String,
       saveMode: SaveMode,
@@ -591,7 +591,6 @@ object IncrementalLoader {
 
         val dataLoader =
           new IncrementalLoader(spark, config.numberOfRounds, config.catalog, config.database)
-
         dataLoader.doWrites(
           config.inputPath,
           config.outputPath,
