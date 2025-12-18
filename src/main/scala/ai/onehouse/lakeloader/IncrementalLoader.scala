@@ -48,7 +48,8 @@ class IncrementalLoader(
       opts: Map[String, String],
       nonPartitioned: Boolean,
       scenarioId: String,
-      writeMode: WriteMode = WriteMode.CopyOnWrite): Unit = {
+      writeMode: WriteMode = WriteMode.CopyOnWrite,
+      roundNum: Int): Unit = {
 
     val tableName = format match {
       case Hudi => genHudiTableName(scenarioId)
@@ -57,7 +58,7 @@ class IncrementalLoader(
     val escapedTableName = escapeTableName(tableName)
     val targetPath = s"$outputPath/${tableName.replace('.', '/')}"
 
-    dropTableIfExists(format, escapedTableName, targetPath)
+    dropTableIfExists(format, escapedTableName, targetPath, roundNum)
 
     val createTableSql = format match {
       case StorageFormat.Hudi =>
@@ -78,7 +79,7 @@ class IncrementalLoader(
       case StorageFormat.Iceberg =>
         val icebergTableProps = buildIcebergTableProperties(opts, writeMode)
         s"""
-           |CREATE TABLE $escapedTableName (
+           |CREATE TABLE IF NOT EXISTS $escapedTableName (
            |  ${schema.toDDL}
            |)
            |USING ICEBERG
@@ -92,6 +93,20 @@ class IncrementalLoader(
     }
 
     executeSparkSql(spark, createTableSql)
+  }
+
+  private def updateIcebergTable(schema: StructType,
+                                  outputPath: String,
+                                  format: StorageFormat,
+                                  opts: Map[String, String],
+                                  nonPartitioned: Boolean,
+                                  scenarioId: String): Unit = {
+    val tableName = genIcebergTableName(scenarioId)
+    val escapedTableName = escapeTableName(tableName)
+    val updateQuery = s"ALTER TABLE $escapedTableName SET TBLPROPERTIES ('write.distribution-mode' = 'hash')"
+    println("Running update query to reset write.distribution-mode - " + updateQuery)
+
+    spark.sql(updateQuery)
   }
 
   private def buildIcebergTableProperties(
@@ -113,12 +128,15 @@ class IncrementalLoader(
   private def dropTableIfExists(
       format: StorageFormat,
       escapedTableName: String,
-      targetPathStr: String): Unit = {
+      targetPathStr: String,
+      roundNum: Int): Unit = {
     format match {
       case StorageFormat.Iceberg =>
         // Since Iceberg persists its catalog information w/in the manifest it's sufficient to just
         // drop the table from SQL
-        executeSparkSql(spark, s"DROP TABLE IF EXISTS $escapedTableName PURGE")
+        if(roundNum == 0) {
+          executeSparkSql(spark, s"DROP TABLE IF EXISTS $escapedTableName PURGE")
+        }
 
       case StorageFormat.Hudi =>
         executeSparkSql(spark, s"DROP TABLE IF EXISTS $escapedTableName PURGE")
@@ -196,33 +214,45 @@ class IncrementalLoader(
         operation
       }
 
-      val inputDF =
+      val rawDF =
         spark.read
           .format(ChangeDataGenerator.DEFAULT_DATA_GEN_FORMAT)
           .load(s"$inputPath/$roundNo")
 
       if (cacheInput) {
-        inputDF.cache()
-        println(s"Cached ${inputDF.count()} records from $inputPath")
-      }
-
-      // Some formats (like Iceberg) require creating table in the Catalog
-      // before you are able to ingest data into it
-      if (roundNo == 0 && (apiType == ApiType.SparkSqlApi || format == StorageFormat.Iceberg)) {
-        tryCreateTable(
-          inputDF.schema,
-          outputPath,
-          format,
-          initialOpts,
-          nonPartitioned,
-          experimentId,
-          writeMode)
+        rawDF.cache()
+        println(s"Cached ${rawDF.count()} records from $inputPath")
       }
 
       val targetOpts = if (roundNo == 0) {
         initialOpts
       } else {
         opts
+      }
+
+      // Some formats (like Iceberg) require creating table in the Catalog
+      // before you are able to ingest data into it
+      if (roundNo == startRound && (apiType == ApiType.SparkSqlApi || format == StorageFormat.Iceberg)) {
+        tryCreateTable(
+          rawDF.schema,
+          outputPath,
+          format,
+          targetOpts,
+          nonPartitioned,
+          experimentId,
+          writeMode,
+          roundNo)
+      }
+
+      // Want to reset the write distribution mode to hash after first commit for Iceberg
+      if (roundNo == 1 && format == StorageFormat.Iceberg && !nonPartitioned) {
+        updateIcebergTable(rawDF.schema, outputPath, format, targetOpts, nonPartitioned, experimentId)
+      }
+
+      val inputDF = if (nonPartitioned || roundNo != 0) {
+        rawDF
+      } else {
+        rawDF.sort("partition","key")
       }
 
       allRoundTimes += doWriteRound(
@@ -316,8 +346,7 @@ class IncrementalLoader(
     timeTaken
   }
 
-  private def writeToIceberg(
-      rawDf: DataFrame,
+  private def writeToIceberg(df: DataFrame,
       operation: OperationType,
       nonPartitioned: Boolean,
       mergeConditionColumns: Seq[String],
@@ -325,11 +354,6 @@ class IncrementalLoader(
       mergeMode: MergeMode,
       tableName: String): Unit = {
     val escapedTableName = escapeTableName(tableName)
-    val df = if (nonPartitioned) {
-      rawDf
-    } else {
-      rawDf.sort("partition","key")
-    }
     df.createOrReplaceTempView(s"source")
 
     operation match {
@@ -371,8 +395,7 @@ class IncrementalLoader(
     }
   }
 
-  private def writeToDelta(
-      rawDf: DataFrame,
+  private def writeToDelta(df: DataFrame,
       operation: OperationType,
       outputPath: String,
       saveMode: SaveMode,
@@ -385,12 +408,6 @@ class IncrementalLoader(
     val targetPath = s"$outputPath/$tableName"
     operation match {
       case OperationType.Insert | OperationType.BulkInsert =>
-        val df = if (nonPartitioned) {
-          rawDf
-        } else {
-          rawDf.sort("partition","key")
-        }
-
         val writer = df.write.format("delta")
         // Enable deletion vectors for merge-on-read mode
         val optionedWriter = writeMode match {
@@ -405,7 +422,6 @@ class IncrementalLoader(
           .save(targetPath)
 
       case OperationType.Upsert =>
-        val df = rawDf
         if (!DeltaTable.isDeltaTable(targetPath)) {
           throw new UnsupportedOperationException("Operation 'upsert' cannot be performed")
         } else {
@@ -443,7 +459,7 @@ class IncrementalLoader(
       saveMode: SaveMode): Unit = {
     operation match {
       case OperationType.Insert | OperationType.BulkInsert =>
-        df.sort("partition","key").write
+        df.write
           .format("parquet")
           .mode(saveMode)
           .save(s"$outputPath/parquet")
@@ -454,7 +470,7 @@ class IncrementalLoader(
   }
 
   private def writeToHudi(
-      rawDf: DataFrame,
+      df: DataFrame,
       operation: OperationType,
       outputPath: String,
       apiType: ApiType,
@@ -465,11 +481,6 @@ class IncrementalLoader(
       updateColumns: Seq[String],
       mergeMode: MergeMode,
       tableName: String): Unit = {
-    val df = if (nonPartitioned) {
-      rawDf
-    } else {
-      rawDf.sort("partition","key")
-    }
     apiType match {
       case ApiType.SparkDatasourceApi =>
         require(
