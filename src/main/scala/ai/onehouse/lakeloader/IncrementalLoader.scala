@@ -94,12 +94,7 @@ class IncrementalLoader(
     executeSparkSql(spark, createTableSql)
   }
 
-  private def updateIcebergTable(schema: StructType,
-                                  outputPath: String,
-                                  format: StorageFormat,
-                                  opts: Map[String, String],
-                                  nonPartitioned: Boolean,
-                                  scenarioId: String): Unit = {
+  private def updateIcebergTable(scenarioId: String): Unit = {
     val tableName = genIcebergTableName(scenarioId)
     val escapedTableName = escapeTableName(tableName)
     val updateQuery = s"ALTER TABLE $escapedTableName SET TBLPROPERTIES ('write.distribution-mode' = 'hash')"
