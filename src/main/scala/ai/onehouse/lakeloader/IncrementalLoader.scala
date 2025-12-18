@@ -186,7 +186,8 @@ class IncrementalLoader(
                 writeMode: WriteMode = WriteMode.CopyOnWrite,
                 asyncCompactionEnabled: Boolean = false,
                 compactionFrequencyCommits: Int = 3,
-                runFinalCompaction: Boolean = true): Unit = {
+                runFinalCompaction: Boolean = true,
+                maxRetries: Int = 0): Unit = {
     require(inputPath.nonEmpty, "Input path cannot be empty")
     require(outputPath.nonEmpty, "Output path cannot be empty")
 
@@ -321,35 +322,80 @@ class IncrementalLoader(
         rawDF.sort("partition", "key")
       }
 
-        val roundTiming = doWriteRound(
-          inputDF,
-          outputPath,
-          format,
-          apiType,
-          saveMode,
-          targetOperation,
-          targetOpts,
-          nonPartitioned,
-          mergeConditionColumns,
-          updateColumns,
-          mergeMode,
-          experimentId,
-          writeMode)
+        var attempt = 0
+        var success = false
 
-        allRoundTimes += roundTiming.durationMs
+        while (attempt <= maxRetries && !success) {
+          val startTime = Instant.now()
+          try {
+            if (attempt > 0) {
+              println(s"""
+                   |$lineSepBold
+                   |Retrying round ${roundNo - startRound + 1} (attempt ${attempt + 1}/${maxRetries + 1})
+                   |$lineSepBold
+                   |""".stripMargin)
+            }
 
-        val batchMetrics = metricsCollector.recordBatch(roundNo, roundTiming.startTime, roundTiming.endTime)
+            val roundTiming = doWriteRound(
+              inputDF,
+              outputPath,
+              format,
+              apiType,
+              saveMode,
+              targetOperation,
+              targetOpts,
+              nonPartitioned,
+              mergeConditionColumns,
+              updateColumns,
+              mergeMode,
+              experimentId,
+              writeMode)
 
-        println(s"""
-             |$lineSepBold
-             |Round ${roundNo - startRound + 1} (roundNo=$roundNo) completed
-             |  Write timing: $roundTiming
-             |  Metrics: $batchMetrics
-             |$lineSepBold
-             |""".stripMargin)
+            allRoundTimes += roundTiming.durationMs
 
-        // Notify compaction service of new commit
-        compactionService.foreach(_.notifyNewCommit())
+            val batchMetrics = metricsCollector.recordBatch(
+              roundNo,
+              roundTiming.startTime,
+              roundTiming.endTime,
+              success = true)
+
+            println(s"""
+                 |$lineSepBold
+                 |Round ${roundNo - startRound + 1} (roundNo=$roundNo) completed
+                 |  Write timing: $roundTiming
+                 |  Metrics: $batchMetrics
+                 |$lineSepBold
+                 |""".stripMargin)
+
+            // Notify compaction service of new commit
+            compactionService.foreach(_.notifyNewCommit())
+            success = true
+
+          } catch {
+            case e: Throwable =>
+              val endTime = Instant.now()
+
+              val batchMetrics = metricsCollector.recordBatch(
+                roundNo,
+                startTime,
+                endTime,
+                success = false,
+                Some(e.getMessage))
+
+              println(s"""
+                   |$lineSepBold
+                   |Round ${roundNo - startRound + 1} (roundNo=$roundNo) FAILED (attempt ${attempt + 1}/${maxRetries + 1})
+                   |  Error: ${e.getMessage}
+                   |  Metrics: $batchMetrics
+                   |$lineSepBold
+                   |""".stripMargin)
+
+              attempt += 1
+              if (attempt > maxRetries) {
+                throw e
+              }
+          }
+        }
 
         inputDF.unpersist()
       })
@@ -700,7 +746,8 @@ object IncrementalLoader {
           writeMode = WriteMode.fromString(config.writeMode),
           asyncCompactionEnabled = config.asyncCompactionEnabled,
           compactionFrequencyCommits = config.compactionFrequencyCommits,
-          runFinalCompaction = config.runFinalCompaction)
+          runFinalCompaction = config.runFinalCompaction,
+          maxRetries = config.maxRetries)
         spark.stop()
       case None =>
         // scopt already prints help

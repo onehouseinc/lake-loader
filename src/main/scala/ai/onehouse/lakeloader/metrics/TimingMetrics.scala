@@ -29,9 +29,13 @@ case class BatchMetrics(
     roundNo: Int,
     startTime: Instant,
     endTime: Instant,
-    durationMs: Long) {
-  override def toString: String =
-    s"BatchMetrics(round=$roundNo, start=$startTime, end=$endTime, duration=${durationMs}ms)"
+    durationMs: Long,
+    success: Boolean,
+    errorMessage: Option[String] = None) {
+  override def toString: String = {
+    val status = if (success) "SUCCESS" else s"FAILED: ${errorMessage.getOrElse("unknown")}"
+    s"BatchMetrics(round=$roundNo, start=$startTime, end=$endTime, duration=${durationMs}ms, status=$status)"
+  }
 }
 
 case class CompactionMetrics(
@@ -52,12 +56,19 @@ class MetricsCollector {
   private val batchMetrics = ListBuffer[BatchMetrics]()
   private val compactionMetrics = ListBuffer[CompactionMetrics]()
 
-  def recordBatch(roundNo: Int, startTime: Instant, endTime: Instant): BatchMetrics = {
+  def recordBatch(
+      roundNo: Int,
+      startTime: Instant,
+      endTime: Instant,
+      success: Boolean,
+      errorMessage: Option[String] = None): BatchMetrics = {
     val metrics = BatchMetrics(
       roundNo = roundNo,
       startTime = startTime,
       endTime = endTime,
-      durationMs = Duration.between(startTime, endTime).toMillis)
+      durationMs = Duration.between(startTime, endTime).toMillis,
+      success = success,
+      errorMessage = errorMessage)
     batchMetrics.synchronized {
       batchMetrics += metrics
     }
@@ -97,10 +108,14 @@ class MetricsCollector {
     val batchSummary = if (batchList.nonEmpty) {
       val total = batchList.map(_.durationMs).sum
       val avg = total / batchList.size
-      s"""BATCH METRICS (${batchList.size} rounds):
-         |${batchList.map(m => s"  Round ${m.roundNo}: ${m.durationMs}ms ${m.startTime.toEpochMilli} ${m.endTime.toEpochMilli}").mkString("\n")}
+      val successCount = batchList.count(_.success)
+      val failedCount = batchList.size - successCount
+      s"""BATCH METRICS (${batchList.size} runs):
+         |${batchList.map(m => s"  Round ${m.roundNo}: ${m.durationMs}ms ${m.startTime.toEpochMilli} ${m.endTime.toEpochMilli} (${if (m.success) "SUCCESS" else "FAILED"})").mkString("\n")}
          |  Total batch time: ${total}ms
-         |  Avg batch time: ${avg}ms""".stripMargin
+         |  Avg batch time: ${avg}ms
+         |  Successful runs: $successCount
+         |  Failed runs: $failedCount""".stripMargin
     } else {
       "BATCH METRICS: No batches recorded"
     }

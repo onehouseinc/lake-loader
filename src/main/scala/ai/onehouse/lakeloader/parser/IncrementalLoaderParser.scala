@@ -113,6 +113,10 @@ object IncrementalLoaderParser {
     opt[Boolean]("run-final-compaction")
       .action((x, c) => c.copy(runFinalCompaction = x))
       .text("Run final compaction on shutdown. Default: true")
+
+    opt[Int]("max-retries")
+      .action((x, c) => c.copy(maxRetries = x))
+      .text("Maximum number of retries for failed ingestion batches. Default: 0 (no retries)")
   }
 
   /**

@@ -185,4 +185,5 @@ case class LoadConfig(
                        writeMode: String = "copy-on-write",
                        asyncCompactionEnabled: Boolean = false,
                        compactionFrequencyCommits: Int = 3,
-                       runFinalCompaction: Boolean = true)
+                       runFinalCompaction: Boolean = true,
+                       maxRetries: Int = 0)
