@@ -14,7 +14,7 @@
 
 package ai.onehouse.lakeloader
 
-import ai.onehouse.lakeloader.ChangeDataGenerator.{COMPRESSION_RATIO_GUESS, genParallelRDD}
+import ai.onehouse.lakeloader.ChangeDataGenerator.{genParallelRDD, COMPRESSION_RATIO_GUESS, PARTITION_PATH_FIELD_NAME, RECORD_KEY_FIELD_NAME}
 import ai.onehouse.lakeloader.configs.{DatagenConfig, KeyTypes, UpdatePatterns}
 import ai.onehouse.lakeloader.configs.KeyTypes.KeyType
 import ai.onehouse.lakeloader.configs.UpdatePatterns.{Uniform, UpdatePatterns, Zipf}
@@ -31,6 +31,7 @@ import ai.onehouse.lakeloader.utils.{MathUtils, StringUtils}
 import java.io.Serializable
 import java.time.LocalDate
 import java.util.UUID.randomUUID
+
 import scala.util.Random
 
 /**
@@ -421,7 +422,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
 }
 
 object ChangeDataGenerator {
-
+  val RECORD_KEY_FIELD_NAME = "key"
+  val PARTITION_PATH_FIELD_NAME = "partition"
   val COMPRESSION_RATIO_GUESS = .66
   val DEFAULT_DATA_GEN_FORMAT: String = "parquet"
 

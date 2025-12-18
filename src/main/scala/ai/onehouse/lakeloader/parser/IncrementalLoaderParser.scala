@@ -15,6 +15,7 @@
 package ai.onehouse.lakeloader.parser
 
 import ai.onehouse.lakeloader.configs.{ApiType, LoadConfig, MergeMode, OperationType, StorageFormat, WriteMode}
+import ai.onehouse.lakeloader.ChangeDataGenerator.{PARTITION_PATH_FIELD_NAME, RECORD_KEY_FIELD_NAME}
 
 object IncrementalLoaderParser {
 
@@ -107,9 +108,9 @@ object IncrementalLoaderParser {
    */
   def getMergeConditionColumns(config: LoadConfig): Seq[String] = {
     val baseColumns = if (config.nonPartitioned) {
-      Seq("key")
+      Seq(RECORD_KEY_FIELD_NAME)
     } else {
-      Seq("key", "partition")
+      Seq(RECORD_KEY_FIELD_NAME, PARTITION_PATH_FIELD_NAME)
     }
     baseColumns ++ config.additionalMergeConditionColumns
   }
