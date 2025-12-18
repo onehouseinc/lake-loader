@@ -187,7 +187,7 @@ class IncrementalLoader(
                 asyncCompactionEnabled: Boolean = false,
                 compactionFrequencyCommits: Int = 3,
                 runFinalCompaction: Boolean = true,
-                maxRetries: Int = 0): Unit = {
+                maxRetries: Int = 5): Unit = {
     require(inputPath.nonEmpty, "Input path cannot be empty")
     require(outputPath.nonEmpty, "Output path cannot be empty")
 
