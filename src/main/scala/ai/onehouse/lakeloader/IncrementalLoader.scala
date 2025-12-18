@@ -252,7 +252,7 @@ class IncrementalLoader(
       val inputDF = if (nonPartitioned || roundNo != 0) {
         rawDF
       } else {
-        rawDF.sort("partition","key")
+        rawDF.sort("partition", "key")
       }
 
       allRoundTimes += doWriteRound(
