@@ -243,7 +243,7 @@ class IncrementalLoader(
       }
 
       // Want to reset the write distribution mode to hash after first commit for Iceberg
-      if (roundNo == 1 && format == StorageFormat.Iceberg && !nonPartitioned) {
+      if (roundNo >= 1 && format == StorageFormat.Iceberg && !nonPartitioned) {
         updateIcebergTable(rawDF.schema, outputPath, format, targetOpts, nonPartitioned, experimentId)
       }
 
