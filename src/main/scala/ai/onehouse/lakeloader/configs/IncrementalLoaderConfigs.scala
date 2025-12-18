@@ -182,4 +182,7 @@ case class LoadConfig(
                        mergeMode: String = "update-insert",
                        additionalMergeConditionColumns: Seq[String] = Seq.empty,
                        updateColumns: Seq[String] = Seq.empty,
-                       writeMode: String = "copy-on-write")
+                       writeMode: String = "copy-on-write",
+                       asyncCompactionEnabled: Boolean = false,
+                       compactionFrequencyCommits: Int = 3,
+                       runFinalCompaction: Boolean = true)
