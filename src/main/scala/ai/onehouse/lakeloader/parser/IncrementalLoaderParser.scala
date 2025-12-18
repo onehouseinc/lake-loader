@@ -116,7 +116,7 @@ object IncrementalLoaderParser {
 
     opt[Int]("max-retries")
       .action((x, c) => c.copy(maxRetries = x))
-      .text("Maximum number of retries for failed ingestion batches. Default: 5 (no retries)")
+      .text("Maximum number of retries for failed ingestion batches. Default: 5")
   }
 
   /**
