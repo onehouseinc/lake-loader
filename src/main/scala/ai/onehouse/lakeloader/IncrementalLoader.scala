@@ -68,7 +68,7 @@ class IncrementalLoader(
            |USING HUDI
            |TBLPROPERTIES (
            |  type = '${writeMode.asHudiTableType}',
-           |  primaryKey = 'key',
+           |  primaryKey = '$RECORD_KEY_FIELD_NAME',
            |  ${serializeOptionsForSql(opts)}
            |)
            |LOCATION '$targetPath'
