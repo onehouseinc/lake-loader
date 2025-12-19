@@ -149,6 +149,10 @@ spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> [option
 | mergeMode             | `--merge-mode`                         | MergeMode          | update-insert    | Merge mode: `update-insert`, `delete-insert`              |
 | updateColumns         | `--update-columns`                     | Seq[String]        | []               | Specific columns to update (empty = all columns)          |
 | writeMode             | `--write-mode`                         | WriteMode          | copy-on-write    | Write mode: `copy-on-write`, `merge-on-read`              |
+| asyncCompactionEnabled | `--async-compaction`                  | Boolean            | false            | Enable async background compaction                        |
+| compactionFrequencyCommits | `--compaction-frequency-commits`  | Int                | 3                | Schedule compaction every N commits                       |
+| runFinalCompaction    | `--run-final-compaction`               | Boolean            | true             | Run final compaction on shutdown                          |
+| maxRetries            | `--max-retries`                        | Int                | 5                | Maximum retries for failed ingestion batches              |
 
 **Notes**:
 * CLI uses `--additional-merge-condition-columns` while Scala API uses `mergeConditionColumns` for the full merge condition list. Default merge columns are `[key]` for non-partitioned or `[key, partition]` for partitioned tables.
@@ -157,6 +161,84 @@ spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> [option
   * **Hudi**: Sets table type to `cow` (Copy-On-Write) or `mor` (Merge-On-Read)
   * **Delta**: Enables deletion vectors when set to `merge-on-read`
   * **Iceberg**: Sets `write.delete.mode`, `write.update.mode`, and `write.merge.mode` properties
+
+### Async Compaction
+
+The IncrementalLoader supports asynchronous background compaction for Merge-On-Read (MOR) tables. This feature allows compaction to run in the background while ingestion continues, improving overall throughput for workloads with frequent updates.
+
+**When to use async compaction:**
+- When using `--write-mode merge-on-read` with Hudi, Delta, or Iceberg formats
+- For workloads with high update ratios where compaction overhead impacts ingestion performance
+- When you want to decouple compaction from the critical write path
+
+**Configuration options:**
+- `--async-compaction`: Enable async background compaction (default: `false`)
+- `--compaction-frequency-commits`: Schedule compaction every N commits (default: `3`)
+- `--run-final-compaction`: Run a final compaction when the loader shuts down (default: `true`)
+
+**Example with async compaction enabled:**
+```bash
+spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> \
+  --input-path s3a://input/data \
+  --output-path s3a://output/table \
+  --format hudi \
+  --write-mode merge-on-read \
+  --async-compaction true \
+  --compaction-frequency-commits 5
+```
+
+**Scala API example:**
+```scala
+loader.doWrites(
+  inputPath,
+  outputPath,
+  format = StorageFormat.Hudi,
+  writeMode = WriteMode.MergeOnRead,
+  asyncCompactionEnabled = true,
+  compactionFrequencyCommits = 5,
+  runFinalCompaction = true
+)
+```
+
+**How it works:**
+1. When async compaction is enabled, ingestion writes proceed without waiting for compaction
+2. A background service monitors commit counts and triggers compaction every N commits
+3. For Hudi MOR tables, the loader automatically configures optimistic concurrency control to allow concurrent writes and compaction
+4. Compaction metrics (start time, end time, duration, success/failure) are collected and reported in the final summary
+5. If a compaction fails, the service will retry with a configurable delay
+
+### Batch Retry Logic
+
+The IncrementalLoader includes automatic retry logic for failed ingestion batches. This improves reliability for long-running benchmarks where transient failures might occur.
+
+**Configuration:**
+- `--max-retries`: Maximum number of retries for failed ingestion batches (default: `5`)
+
+**Behavior:**
+- When a batch fails, the loader will retry up to `maxRetries` times before giving up
+- Each failed attempt is recorded with full metrics (start time, end time, duration, error message)
+- Both successful and failed batch metrics are included in the final summary
+- If all retries are exhausted, the original exception is re-thrown
+
+**Example:**
+```bash
+spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> \
+  --input-path s3a://input/data \
+  --output-path s3a://output/table \
+  --format iceberg \
+  --max-retries 3
+```
+
+**Metrics output includes:**
+```
+BATCH METRICS (N runs):
+  Round 0: 1234ms ... (SUCCESS)
+  Round 1: 567ms ... (FAILED)
+  Round 1: 890ms ... (SUCCESS)
+  ...
+  Successful runs: X
+  Failed runs: Y
+```
 
 ## Usage Examples
 

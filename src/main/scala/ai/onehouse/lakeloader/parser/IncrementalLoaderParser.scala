@@ -101,6 +101,22 @@ object IncrementalLoaderParser {
       .action((x, c) => c.copy(writeMode = x.asString))
       .text(
         s"Write mode for updates/deletes. Applies to Hudi (table type), Delta (deletion vectors), and Iceberg. Options: ${WriteMode.values().mkString(", ")}. Default: copy-on-write")
+
+    opt[Boolean]("async-compaction")
+      .action((x, c) => c.copy(asyncCompactionEnabled = x))
+      .text("Enable async background compaction. Default: false")
+
+    opt[Int]("compaction-frequency-commits")
+      .action((x, c) => c.copy(compactionFrequencyCommits = x))
+      .text("Schedule compaction every N commits. Default: 3")
+
+    opt[Boolean]("run-final-compaction")
+      .action((x, c) => c.copy(runFinalCompaction = x))
+      .text("Run final compaction on shutdown. Default: true")
+
+    opt[Int]("max-retries")
+      .action((x, c) => c.copy(maxRetries = x))
+      .text("Maximum number of retries for failed ingestion batches. Default: 5")
   }
 
   /**

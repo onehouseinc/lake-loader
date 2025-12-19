@@ -17,6 +17,8 @@ package ai.onehouse.lakeloader
 import ai.onehouse.lakeloader.configs.MergeMode.{DeleteInsert, UpdateInsert}
 import ai.onehouse.lakeloader.configs.{ApiType, LoadConfig, MergeMode, OperationType, StorageFormat, WriteMode}
 import ai.onehouse.lakeloader.configs.StorageFormat.{Delta, Hudi, Iceberg, Parquet}
+import ai.onehouse.lakeloader.compaction.AsyncCompactionService
+import ai.onehouse.lakeloader.metrics.{MetricsCollector, RoundTiming}
 import ai.onehouse.lakeloader.parser.IncrementalLoaderParser
 import org.apache.hadoop.fs.Path
 import org.apache.hudi.DataSourceWriteOptions
@@ -31,6 +33,7 @@ import ai.onehouse.lakeloader.ChangeDataGenerator.{PARTITION_PATH_FIELD_NAME, RE
 import io.delta.tables.DeltaTable
 
 import java.io.Serializable
+import java.time.{Duration, Instant}
 
 import scala.collection.mutable.ListBuffer
 
@@ -40,6 +43,8 @@ class IncrementalLoader(
     val catalog: String = "spark_catalog",
     val database: String = "default")
     extends Serializable {
+
+  val metricsCollector: MetricsCollector = new MetricsCollector()
 
   private def tryCreateTable(schema: StructType,
                              outputPath: String,
@@ -178,34 +183,103 @@ class IncrementalLoader(
                 mergeConditionColumns: Seq[String] = Seq(RECORD_KEY_FIELD_NAME, PARTITION_PATH_FIELD_NAME),
                 updateColumns: Seq[String] = Seq.empty,
                 mergeMode: MergeMode = MergeMode.UpdateInsert,
-                writeMode: WriteMode = WriteMode.CopyOnWrite): Unit = {
+                writeMode: WriteMode = WriteMode.CopyOnWrite,
+                asyncCompactionEnabled: Boolean = false,
+                compactionFrequencyCommits: Int = 3,
+                runFinalCompaction: Boolean = true,
+                maxRetries: Int = 5): Unit = {
     require(inputPath.nonEmpty, "Input path cannot be empty")
     require(outputPath.nonEmpty, "Output path cannot be empty")
+
+    val compactionStatus =
+      if (asyncCompactionEnabled) s"ENABLED (every $compactionFrequencyCommits commits)" else "DISABLED"
     println(s"""
          |$lineSepBold
          |Executing $experimentId ($numRounds rounds)
+         |Async Compaction: $compactionStatus
          |$lineSepBold
          |""".stripMargin)
 
+    // Determine table name and path for compaction
+    val tableName = format match {
+      case Hudi    => genHudiTableName(experimentId)
+      case Iceberg => genIcebergTableName(experimentId)
+      case Delta   => s"delta-$experimentId"
+      case _       => experimentId
+    }
+    val tablePath = s"$outputPath/${tableName.replace('.', '/')}"
+
+    val concurrencyOpts = if (writeMode == WriteMode.MergeOnRead && asyncCompactionEnabled && format == Hudi) {
+      // Base concurrency control options required for concurrent writes
+      Map(
+        "hoodie.write.concurrency.mode" -> "optimistic_concurrency_control",
+        "hoodie.clean.failed.writes.policy" -> "LAZY",
+        "hoodie.write.lock.provider" -> "org.apache.hudi.client.transaction.lock.InProcessLockProvider"
+      )
+    } else {
+      Map.empty[String, String]
+    }
+
+    if (concurrencyOpts.nonEmpty) {
+      println(s"Injecting Hudi concurrency options: $concurrencyOpts")
+    }
+
+    // Configure Hudi options for async compaction
+    val compactionOpts = if (writeMode == WriteMode.MergeOnRead && asyncCompactionEnabled && format == Hudi) {
+      executeSparkSql(spark, "SET hoodie.compact.inline = false")
+      executeSparkSql(spark, "SET hoodie.compact.schedule.inline = true")
+      Map("hoodie.compact.inline" -> "false",
+        "hoodie.compact.schedule.inline" -> "true",
+        "hoodie.compact.inline.max.delta.commits" -> compactionFrequencyCommits.toString
+      )
+    } else {
+      Map.empty[String, String]
+    }
+
+    if (compactionOpts.nonEmpty) {
+      println(s"[Ingestion] Injecting Hudi concurrency options: $compactionOpts")
+    }
+
+    // Initialize async compaction service if enabled
+    val compactionService: Option[AsyncCompactionService] =
+      if (asyncCompactionEnabled && format != Parquet) {
+        // Merge user options with compaction options for the service
+        val serviceWriteOpts = opts ++ concurrencyOpts
+        val service = new AsyncCompactionService(
+          spark = spark,
+          format = format,
+          tablePath = tablePath,
+          tableName = tableName,
+          metricsCollector = metricsCollector,
+          writeOptions = serviceWriteOpts,
+          compactionFrequencyCommits = compactionFrequencyCommits)
+        service.start()
+        Some(service)
+      } else {
+        None
+      }
+
     val allRoundTimes = new ListBuffer[Long]()
-    (startRound until startRound + numRounds).foreach(roundNo => {
-      println(s"""
-           |$lineSepBold
-           |Writing round ${roundNo - startRound + 1} / $numRounds (absolute round: $roundNo)
-           |$lineSepBold
-           |""".stripMargin)
 
-      val saveMode = if (roundNo == 0 && overwrite) {
-        SaveMode.Overwrite
-      } else {
-        SaveMode.Append
-      }
+    try {
+      (startRound until startRound + numRounds).foreach(roundNo => {
+        println(s"""
+             |$lineSepBold
+             |Writing round ${roundNo - startRound + 1} / $numRounds (absolute round: $roundNo)
+             |$lineSepBold
+             |""".stripMargin)
 
-      val targetOperation = if (roundNo == 0) {
-        initialOperation
-      } else {
-        operation
-      }
+        val saveMode = if (roundNo == 0 && overwrite) {
+          SaveMode.Overwrite
+        } else {
+          SaveMode.Append
+        }
+
+        val targetOperation = if (roundNo == 0) {
+          initialOperation
+        } else {
+          operation
+        }
 
       val rawDF =
         spark.read
@@ -218,9 +292,9 @@ class IncrementalLoader(
       }
 
       val targetOpts = if (roundNo == 0) {
-        initialOpts
+        initialOpts ++ compactionOpts
       } else {
-        opts
+        opts ++ compactionOpts
       }
 
       // Some formats (like Iceberg) require creating table in the Catalog
@@ -230,7 +304,7 @@ class IncrementalLoader(
           rawDF.schema,
           outputPath,
           format,
-          targetOpts,
+          targetOpts ++ compactionOpts,
           nonPartitioned,
           experimentId,
           writeMode,
@@ -248,23 +322,87 @@ class IncrementalLoader(
         rawDF.sort("partition", "key")
       }
 
-      allRoundTimes += doWriteRound(
-        inputDF,
-        outputPath,
-        format,
-        apiType,
-        saveMode,
-        targetOperation,
-        targetOpts,
-        nonPartitioned,
-        mergeConditionColumns,
-        updateColumns,
-        mergeMode,
-        experimentId,
-        writeMode)
+        var attempt = 0
+        var success = false
 
-      inputDF.unpersist()
-    })
+        while (attempt <= maxRetries && !success) {
+          val startTime = Instant.now()
+          try {
+            if (attempt > 0) {
+              println(s"""
+                   |$lineSepBold
+                   |Retrying round ${roundNo - startRound + 1} (attempt ${attempt + 1}/${maxRetries + 1})
+                   |$lineSepBold
+                   |""".stripMargin)
+            }
+
+            val roundTiming = doWriteRound(
+              inputDF,
+              outputPath,
+              format,
+              apiType,
+              saveMode,
+              targetOperation,
+              targetOpts,
+              nonPartitioned,
+              mergeConditionColumns,
+              updateColumns,
+              mergeMode,
+              experimentId,
+              writeMode)
+
+            allRoundTimes += roundTiming.durationMs
+
+            val batchMetrics = metricsCollector.recordBatch(
+              roundNo,
+              roundTiming.startTime,
+              roundTiming.endTime,
+              success = true)
+
+            println(s"""
+                 |$lineSepBold
+                 |Round ${roundNo - startRound + 1} (roundNo=$roundNo) completed
+                 |  Write timing: $roundTiming
+                 |  Metrics: $batchMetrics
+                 |$lineSepBold
+                 |""".stripMargin)
+
+            // Notify compaction service of new commit
+            compactionService.foreach(_.notifyNewCommit())
+            success = true
+
+          } catch {
+            case e: Throwable =>
+              val endTime = Instant.now()
+
+              val batchMetrics = metricsCollector.recordBatch(
+                roundNo,
+                startTime,
+                endTime,
+                success = false,
+                Some(e.getMessage))
+
+              println(s"""
+                   |$lineSepBold
+                   |Round ${roundNo - startRound + 1} (roundNo=$roundNo) FAILED (attempt ${attempt + 1}/${maxRetries + 1})
+                   |  Error: ${e.getMessage}
+                   |  Metrics: $batchMetrics
+                   |$lineSepBold
+                   |""".stripMargin)
+
+              attempt += 1
+              if (attempt > maxRetries) {
+                throw e
+              }
+          }
+        }
+
+        inputDF.unpersist()
+      })
+    } finally {
+      // Shutdown compaction service
+      compactionService.foreach(_.shutdown(runFinalCompaction))
+    }
 
     println(s"""
          |$lineSepBold
@@ -272,6 +410,9 @@ class IncrementalLoader(
          |Per round: ${allRoundTimes.toList}
          |$lineSepBold
          |""".stripMargin)
+
+    // Print comprehensive metrics summary
+    metricsCollector.printSummary()
   }
 
   def doWriteRound(
@@ -287,8 +428,8 @@ class IncrementalLoader(
       updateColumns: Seq[String],
       mergeMode: MergeMode,
       experimentId: String,
-      writeMode: WriteMode = WriteMode.CopyOnWrite): Long = {
-    val startMs = System.currentTimeMillis()
+      writeMode: WriteMode = WriteMode.CopyOnWrite): RoundTiming = {
+    val startTime = Instant.now()
 
     format match {
       case Hudi =>
@@ -334,9 +475,10 @@ class IncrementalLoader(
         throw new UnsupportedOperationException(s"$format is not supported")
     }
 
-    val timeTaken = System.currentTimeMillis() - startMs
-    println(s"Took ${timeTaken} ms.")
-    timeTaken
+    val endTime = Instant.now()
+    val durationMs = Duration.between(startTime, endTime).toMillis
+    println(s"Took ${durationMs} ms.")
+    RoundTiming(startTime, endTime, durationMs)
   }
 
   private def writeToIceberg(
@@ -601,7 +743,11 @@ object IncrementalLoader {
           mergeConditionColumns = IncrementalLoaderParser.getMergeConditionColumns(config),
           updateColumns = config.updateColumns,
           mergeMode = MergeMode.fromString(config.mergeMode),
-          writeMode = WriteMode.fromString(config.writeMode))
+          writeMode = WriteMode.fromString(config.writeMode),
+          asyncCompactionEnabled = config.asyncCompactionEnabled,
+          compactionFrequencyCommits = config.compactionFrequencyCommits,
+          runFinalCompaction = config.runFinalCompaction,
+          maxRetries = config.maxRetries)
         spark.stop()
       case None =>
         // scopt already prints help
