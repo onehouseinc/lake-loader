@@ -30,6 +30,7 @@ import ai.onehouse.lakeloader.utils.SparkUtils.executeSparkSql
 import ai.onehouse.lakeloader.utils.StringUtils
 import ai.onehouse.lakeloader.utils.StringUtils.lineSepBold
 import ai.onehouse.lakeloader.ChangeDataGenerator.{PARTITION_PATH_FIELD_NAME, RECORD_KEY_FIELD_NAME}
+import ai.onehouse.lakeloader.IncrementalLoader.getTablePath
 import io.delta.tables.DeltaTable
 
 import java.io.Serializable
@@ -60,7 +61,7 @@ class IncrementalLoader(
       case Iceberg => genIcebergTableName(scenarioId)
     }
     val escapedTableName = escapeTableName(tableName)
-    val targetPath = s"$outputPath/${tableName.replace('.', '/')}"
+    val targetPath = getTablePath(outputPath, tableName)
 
     dropTableIfExists(format, escapedTableName, targetPath, roundNo)
 
@@ -72,7 +73,7 @@ class IncrementalLoader(
            |)
            |USING HUDI
            |TBLPROPERTIES (
-           |  type = '${writeMode.asHudiTableType}',
+           |  type = '${writeMode.asHudiSqlWriteTableType}',
            |  primaryKey = '$RECORD_KEY_FIELD_NAME',
            |  ${serializeOptionsForSql(opts)}
            |)
@@ -207,7 +208,7 @@ class IncrementalLoader(
       case Delta   => s"delta-$experimentId"
       case _       => experimentId
     }
-    val tablePath = s"$outputPath/${tableName.replace('.', '/')}"
+    val tablePath = getTablePath(outputPath, tableName)
 
     val concurrencyOpts = if (writeMode == WriteMode.MergeOnRead && asyncCompactionEnabled && format == Hudi) {
       // Base concurrency control options required for concurrent writes
@@ -445,7 +446,8 @@ class IncrementalLoader(
           mergeConditionColumns,
           updateColumns,
           mergeMode,
-          tableName)
+          tableName,
+          writeMode)
       case Delta =>
         val tableName = s"delta-$experimentId"
         writeToDelta(
@@ -617,7 +619,8 @@ class IncrementalLoader(
       mergeConditionColumns: Seq[String],
       updateColumns: Seq[String],
       mergeMode: MergeMode,
-      tableName: String): Unit = {
+      tableName: String,
+      writeMode: WriteMode): Unit = {
     apiType match {
       case ApiType.SparkDatasourceApi =>
         require(
@@ -646,9 +649,10 @@ class IncrementalLoader(
         df.write
           .format("hudi")
           .options(targetOpts)
+          .option(DataSourceWriteOptions.TABLE_TYPE.key, writeMode.asHudiDatasourceWriteTableType)
           .option(DataSourceWriteOptions.OPERATION.key, operation.asString)
           .mode(saveMode)
-          .save(s"$outputPath/$tableName")
+          .save(getTablePath(outputPath, tableName))
 
       case ApiType.SparkSqlApi =>
         df.createOrReplaceTempView("source")
@@ -753,5 +757,9 @@ object IncrementalLoader {
         // scopt already prints help
         sys.exit(1)
     }
+  }
+
+  def getTablePath(outputPath: String, tableName: String): String = {
+    s"$outputPath/${tableName.replace('.', '/')}"
   }
 }

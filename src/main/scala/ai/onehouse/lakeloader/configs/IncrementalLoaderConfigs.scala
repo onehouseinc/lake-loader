@@ -132,17 +132,20 @@ object ApiType {
 
 sealed trait WriteMode {
   def asString: String
-  def asHudiTableType: String
+  def asHudiSqlWriteTableType: String
+  def asHudiDatasourceWriteTableType: String
 }
 
 object WriteMode {
   case object CopyOnWrite extends WriteMode {
     val asString = "copy-on-write"
-    val asHudiTableType = "cow"
+    val asHudiSqlWriteTableType = "cow"
+    val asHudiDatasourceWriteTableType = "COPY_ON_WRITE"
   }
   case object MergeOnRead extends WriteMode {
     val asString = "merge-on-read"
-    val asHudiTableType = "mor"
+    val asHudiSqlWriteTableType = "mor"
+    val asHudiDatasourceWriteTableType = "MERGE_ON_READ"
   }
 
   def fromString(s: String): WriteMode = s match {
