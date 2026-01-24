@@ -35,7 +35,9 @@ class AsyncCompactionService(
     metricsCollector: MetricsCollector,
     writeOptions: Map[String, String] = Map.empty,
     compactionFrequencyCommits: Int = 3,
-    retryDelayMinutes: Int = 1) {
+    retryDelayMinutes: Int = 1,
+    compactionMinFileSize: Long = 100 * 1024 * 1024,
+    compactionTargetFileSize: Long = 120 * 1024 * 1024) {
 
   private val executor: ExecutorService = Executors.newSingleThreadExecutor()
   private val retryScheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
@@ -193,12 +195,17 @@ class AsyncCompactionService(
 
   private def runIcebergCompaction(): Unit = {
     val catalogName = tableName.split("\\.").headOption.getOrElse("spark_catalog")
-    val compactionSql = s"CALL $catalogName.system.rewrite_data_files(table => '$tableName')"
-    println(s"[AsyncCompaction] Running Iceberg compaction: $compactionSql")
+    val compactionSql = s"CALL $catalogName.system.rewrite_data_files(table => '$tableName', options => map('min-file-size-bytes', '$compactionMinFileSize', 'target-file-size-bytes', '$compactionTargetFileSize'))"
+    println(s"[AsyncCompaction] Running Iceberg compaction (minFileSize=$compactionMinFileSize, targetFileSize=$compactionTargetFileSize): $compactionSql")
     executeSparkSql(spark, compactionSql)
   }
 
   private def runDeltaCompaction(): Unit = {
+    // Set Delta OPTIMIZE configs
+    spark.conf.set("spark.databricks.delta.optimize.minFileSize", compactionMinFileSize)
+    spark.conf.set("spark.databricks.delta.optimize.maxFileSize", compactionTargetFileSize)
+    println(s"[AsyncCompaction] Delta OPTIMIZE config: minFileSize=$compactionMinFileSize, targetFileSize=$compactionTargetFileSize")
+
     val optimizeSql = s"OPTIMIZE delta.`$tablePath`"
     println(s"[AsyncCompaction] Running Delta compaction: $optimizeSql")
     executeSparkSql(spark, optimizeSql)

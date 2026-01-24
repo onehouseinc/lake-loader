@@ -118,7 +118,13 @@ def doWrites(
   mergeConditionColumns: Seq[String] = Seq.empty,
   mergeMode: MergeMode = MergeMode.UpdateInsert,
   updateColumns: Seq[String] = Seq.empty,
-  writeMode: WriteMode = WriteMode.CopyOnWrite
+  writeMode: WriteMode = WriteMode.CopyOnWrite,
+  asyncCompactionEnabled: Boolean = false,
+  compactionFrequencyCommits: Int = 3,
+  runFinalCompaction: Boolean = true,
+  maxRetries: Int = 5,
+  compactionMinFileSize: Long = 104857600,
+  compactionTargetFileSize: Long = 125829120
 )
 ```
 
@@ -153,6 +159,8 @@ spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> [option
 | compactionFrequencyCommits | `--compaction-frequency-commits`  | Int                | 3                | Schedule compaction every N commits                       |
 | runFinalCompaction    | `--run-final-compaction`               | Boolean            | true             | Run final compaction on shutdown                          |
 | maxRetries            | `--max-retries`                        | Int                | 5                | Maximum retries for failed ingestion batches              |
+| compactionMinFileSize | `--compaction-min-file-size`            | Long               | 104857600        | Files smaller than this (bytes) are grouped and rewritten |
+| compactionTargetFileSize | `--compaction-target-file-size`      | Long               | 125829120        | Target file size (bytes) produced by compaction           |
 
 **Notes**:
 * CLI uses `--additional-merge-condition-columns` while Scala API uses `mergeConditionColumns` for the full merge condition list. Default merge columns are `[key]` for non-partitioned or `[key, partition]` for partitioned tables.
@@ -176,7 +184,11 @@ The IncrementalLoader supports asynchronous background compaction for Merge-On-R
 - `--compaction-frequency-commits`: Schedule compaction every N commits (default: `3`)
 - `--run-final-compaction`: Run a final compaction when the loader shuts down (default: `true`)
 
-**Example with async compaction enabled:**
+**Compaction file size options:**
+- `--compaction-min-file-size`: Files smaller than this threshold (in bytes) will be grouped together and rewritten by compaction. Applies to Delta OPTIMIZE (`spark.databricks.delta.optimize.minFileSize`) and Iceberg `rewrite_data_files` (`min-file-size-bytes`). Default: `104857600` (100MB)
+- `--compaction-target-file-size`: Target file size (in bytes) produced by compaction. Applies to Delta OPTIMIZE (`spark.databricks.delta.optimize.maxFileSize`) and Iceberg `rewrite_data_files` (`target-file-size-bytes`). For Iceberg with MOR and async compaction enabled, this also sets the ingestion file size (`write.target-file-size-bytes`). Default: `125829120` (120MB)
+
+**Example with async compaction enabled (Hudi):**
 ```bash
 spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> \
   --input-path s3a://input/data \
@@ -187,7 +199,19 @@ spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> \
   --compaction-frequency-commits 5
 ```
 
-**Scala API example:**
+**Example with async compaction enabled (Delta/Iceberg with file size tuning):**
+```bash
+spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> \
+  --input-path s3a://input/data \
+  --output-path s3a://output/table \
+  --format delta \
+  --async-compaction true \
+  --compaction-frequency-commits 5 \
+  --compaction-min-file-size 104857600 \
+  --compaction-target-file-size 125829120
+```
+
+**Scala API example (Hudi):**
 ```scala
 loader.doWrites(
   inputPath,
@@ -197,6 +221,19 @@ loader.doWrites(
   asyncCompactionEnabled = true,
   compactionFrequencyCommits = 5,
   runFinalCompaction = true
+)
+```
+
+**Scala API example (Delta/Iceberg with file size tuning):**
+```scala
+loader.doWrites(
+  inputPath,
+  outputPath,
+  format = StorageFormat.Delta,  // or StorageFormat.Iceberg
+  asyncCompactionEnabled = true,
+  compactionFrequencyCommits = 5,
+  compactionMinFileSize = 100 * 1024 * 1024,
+  compactionTargetFileSize = 120 * 1024 * 1024
 )
 ```
 

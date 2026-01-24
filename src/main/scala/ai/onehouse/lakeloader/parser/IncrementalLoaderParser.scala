@@ -117,6 +117,14 @@ object IncrementalLoaderParser {
     opt[Int]("max-retries")
       .action((x, c) => c.copy(maxRetries = x))
       .text("Maximum number of retries for failed ingestion batches. Default: 5")
+
+    opt[Long]("compaction-min-file-size")
+      .action((x, c) => c.copy(compactionMinFileSize = x))
+      .text("Files smaller than this threshold (in bytes) will be grouped and rewritten by compaction. Default: 104857600 (100MB)")
+
+    opt[Long]("compaction-target-file-size")
+      .action((x, c) => c.copy(compactionTargetFileSize = x))
+      .text("Target file size in bytes produced by compaction. Default: 125829120 (120MB)")
   }
 
   /**
