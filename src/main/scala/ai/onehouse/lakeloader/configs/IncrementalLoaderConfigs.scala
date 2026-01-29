@@ -189,4 +189,6 @@ case class LoadConfig(
                        asyncCompactionEnabled: Boolean = false,
                        compactionFrequencyCommits: Int = 3,
                        runFinalCompaction: Boolean = true,
-                       maxRetries: Int = 5)
+                       maxRetries: Int = 5,
+                       compactionMinFileSize: Long = 100 * 1024 * 1024,
+                       compactionTargetFileSize: Long = 120 * 1024 * 1024)

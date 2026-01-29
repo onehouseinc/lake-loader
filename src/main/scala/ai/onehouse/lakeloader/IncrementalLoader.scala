@@ -54,7 +54,9 @@ class IncrementalLoader(
                              nonPartitioned: Boolean,
                              scenarioId: String,
                              writeMode: WriteMode = WriteMode.CopyOnWrite,
-                             roundNo: Int): Unit = {
+                             roundNo: Int,
+                             asyncCompactionEnabled: Boolean = false,
+                             compactionTargetFileSize: Long = 120 * 1024 * 1024): Unit = {
 
     val tableName = format match {
       case Hudi => genHudiTableName(scenarioId)
@@ -82,7 +84,7 @@ class IncrementalLoader(
            |""".stripMargin
 
       case StorageFormat.Iceberg =>
-        val icebergTableProps = buildIcebergTableProperties(opts, writeMode)
+        val icebergTableProps = buildIcebergTableProperties(opts, writeMode, asyncCompactionEnabled, compactionTargetFileSize)
         s"""
            |CREATE TABLE IF NOT EXISTS $escapedTableName (
            |  ${schema.toDDL}
@@ -111,7 +113,9 @@ class IncrementalLoader(
 
   private def buildIcebergTableProperties(
       userOpts: Map[String, String],
-      writeMode: WriteMode): String = {
+      writeMode: WriteMode,
+      asyncCompactionEnabled: Boolean = false,
+      compactionTargetFileSize: Long = 120 * 1024 * 1024): String = {
     val writeModeStr = writeMode.asString
 
     // Build base write mode properties (deletion file type uses Iceberg defaults based on table spec version)
@@ -120,8 +124,15 @@ class IncrementalLoader(
       "write.update.mode" -> writeModeStr,
       "write.merge.mode" -> writeModeStr)
 
+    // Set target file size for ingestion when MOR and async compaction are enabled
+    val fileSizeProps = if (writeMode == WriteMode.MergeOnRead && asyncCompactionEnabled) {
+      Map("write.target-file-size-bytes" -> compactionTargetFileSize.toString)
+    } else {
+      Map.empty[String, String]
+    }
+
     // Combine all properties, with user options taking precedence
-    val allProps = writeModeProps ++ userOpts
+    val allProps = writeModeProps ++ fileSizeProps ++ userOpts
     serializeOptionsForSql(allProps)
   }
 
@@ -188,7 +199,9 @@ class IncrementalLoader(
                 asyncCompactionEnabled: Boolean = false,
                 compactionFrequencyCommits: Int = 3,
                 runFinalCompaction: Boolean = true,
-                maxRetries: Int = 5): Unit = {
+                maxRetries: Int = 5,
+                compactionMinFileSize: Long = 100 * 1024 * 1024,
+                compactionTargetFileSize: Long = 120 * 1024 * 1024): Unit = {
     require(inputPath.nonEmpty, "Input path cannot be empty")
     require(outputPath.nonEmpty, "Output path cannot be empty")
 
@@ -253,7 +266,9 @@ class IncrementalLoader(
           tableName = tableName,
           metricsCollector = metricsCollector,
           writeOptions = serviceWriteOpts,
-          compactionFrequencyCommits = compactionFrequencyCommits)
+          compactionFrequencyCommits = compactionFrequencyCommits,
+          compactionMinFileSize = compactionMinFileSize,
+          compactionTargetFileSize = compactionTargetFileSize)
         service.start()
         Some(service)
       } else {
@@ -309,7 +324,9 @@ class IncrementalLoader(
           nonPartitioned,
           experimentId,
           writeMode,
-          roundNo)
+          roundNo,
+          asyncCompactionEnabled,
+          compactionTargetFileSize)
       }
 
       // Want to reset the write distribution mode to hash after first commit for Iceberg
@@ -751,7 +768,9 @@ object IncrementalLoader {
           asyncCompactionEnabled = config.asyncCompactionEnabled,
           compactionFrequencyCommits = config.compactionFrequencyCommits,
           runFinalCompaction = config.runFinalCompaction,
-          maxRetries = config.maxRetries)
+          maxRetries = config.maxRetries,
+          compactionMinFileSize = config.compactionMinFileSize,
+          compactionTargetFileSize = config.compactionTargetFileSize)
         spark.stop()
       case None =>
         // scopt already prints help
