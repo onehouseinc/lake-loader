@@ -573,7 +573,13 @@ class IncrementalLoader(
             writer
         }
 
-        optionedWriter
+        val partitionedWriter = if (nonPartitioned) {
+          optionedWriter
+        } else {
+          optionedWriter.partitionBy(PARTITION_PATH_FIELD_NAME)
+        }
+
+        partitionedWriter
           .mode(saveMode)
           .save(targetPath)
 
