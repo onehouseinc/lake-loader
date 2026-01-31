@@ -161,6 +161,7 @@ spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> [option
 | maxRetries            | `--max-retries`                        | Int                | 5                | Maximum retries for failed ingestion batches              |
 | compactionMinFileSize | `--compaction-min-file-size`            | Long               | 104857600        | Files smaller than this (bytes) are grouped and rewritten |
 | compactionTargetFileSize | `--compaction-target-file-size`      | Long               | 125829120        | Target file size (bytes) produced by compaction           |
+| deltaOptimizeWrite    | `--delta-optimize-write`               | Boolean            | true             | Enable optimized writes for Delta Lake partitioned tables |
 
 **Notes**:
 * CLI uses `--additional-merge-condition-columns` while Scala API uses `mergeConditionColumns` for the full merge condition list. Default merge columns are `[key]` for non-partitioned or `[key, partition]` for partitioned tables.
@@ -243,6 +244,35 @@ loader.doWrites(
 3. For Hudi MOR tables, the loader automatically configures optimistic concurrency control to allow concurrent writes and compaction
 4. Compaction metrics (start time, end time, duration, success/failure) are collected and reported in the final summary
 5. If a compaction fails, the service will retry with a configurable delay
+
+### Delta Lake Optimized Writes
+
+The IncrementalLoader supports Delta Lake's `optimizeWrite` feature for partitioned tables. This feature automatically coalesces small files and balances data distribution across output files, preventing skewed large files during write and merge operations.
+
+**When to use:**
+- When writing to partitioned Delta tables with uneven data distribution
+- When merge operations produce skewed large files (e.g., 90GB+ files alongside ~1GB files)
+- For large-scale workloads (multi-TB) where data skew is common
+
+**Configuration:**
+- `--delta-optimize-write`: Enable optimized writes for Delta Lake partitioned tables (default: `true`)
+
+**How it works:**
+- For **Upsert (merge)** operations: Sets session config `spark.databricks.delta.optimizeWrite.enabled` to balance data distribution and prevent skewed large files
+
+**Example:**
+```bash
+spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> \
+  --input-path s3a://input/data \
+  --output-path s3a://output/table \
+  --format delta \
+  --delta-optimize-write true
+```
+
+To disable (not recommended for partitioned tables):
+```bash
+  --delta-optimize-write false
+```
 
 ### Batch Retry Logic
 

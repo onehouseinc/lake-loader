@@ -125,6 +125,10 @@ object IncrementalLoaderParser {
     opt[Long]("compaction-target-file-size")
       .action((x, c) => c.copy(compactionTargetFileSize = x))
       .text("Target file size in bytes produced by compaction. Default: 125829120 (120MB)")
+
+    opt[Boolean]("delta-optimize-write")
+      .action((x, c) => c.copy(deltaOptimizeWrite = x))
+      .text("Enable optimized writes for Delta Lake merge operations on partitioned tables. Balances data distribution to avoid skewed large files. Default: true")
   }
 
   /**
