@@ -201,7 +201,8 @@ class IncrementalLoader(
                 runFinalCompaction: Boolean = true,
                 maxRetries: Int = 5,
                 compactionMinFileSize: Long = 100 * 1024 * 1024,
-                compactionTargetFileSize: Long = 120 * 1024 * 1024): Unit = {
+                compactionTargetFileSize: Long = 120 * 1024 * 1024,
+                deltaOptimizeWrite: Boolean = true): Unit = {
     require(inputPath.nonEmpty, "Input path cannot be empty")
     require(outputPath.nonEmpty, "Output path cannot be empty")
 
@@ -367,7 +368,8 @@ class IncrementalLoader(
               updateColumns,
               mergeMode,
               experimentId,
-              writeMode)
+              writeMode,
+              deltaOptimizeWrite)
 
             allRoundTimes += roundTiming.durationMs
 
@@ -446,7 +448,8 @@ class IncrementalLoader(
       updateColumns: Seq[String],
       mergeMode: MergeMode,
       experimentId: String,
-      writeMode: WriteMode = WriteMode.CopyOnWrite): RoundTiming = {
+      writeMode: WriteMode = WriteMode.CopyOnWrite,
+      deltaOptimizeWrite: Boolean = true): RoundTiming = {
     val startTime = Instant.now()
 
     format match {
@@ -477,7 +480,8 @@ class IncrementalLoader(
           updateColumns,
           mergeMode,
           tableName,
-          writeMode)
+          writeMode,
+          deltaOptimizeWrite)
       case Parquet =>
         writeToParquet(inputDF, operation, outputPath, saveMode)
       case Iceberg =>
@@ -560,7 +564,8 @@ class IncrementalLoader(
       updateColumns: Seq[String],
       mergeMode: MergeMode,
       tableName: String,
-      writeMode: WriteMode): Unit = {
+      writeMode: WriteMode,
+      deltaOptimizeWrite: Boolean = true): Unit = {
     val targetPath = s"$outputPath/$tableName"
     operation match {
       case OperationType.Insert | OperationType.BulkInsert =>
@@ -584,6 +589,10 @@ class IncrementalLoader(
           .save(targetPath)
 
       case OperationType.Upsert =>
+        if (deltaOptimizeWrite && !nonPartitioned) {
+          spark.conf.set("spark.databricks.delta.optimizeWrite.enabled", "true")
+        }
+
         if (!DeltaTable.isDeltaTable(targetPath)) {
           throw new UnsupportedOperationException("Operation 'upsert' cannot be performed")
         } else {
@@ -776,7 +785,8 @@ object IncrementalLoader {
           runFinalCompaction = config.runFinalCompaction,
           maxRetries = config.maxRetries,
           compactionMinFileSize = config.compactionMinFileSize,
-          compactionTargetFileSize = config.compactionTargetFileSize)
+          compactionTargetFileSize = config.compactionTargetFileSize,
+          deltaOptimizeWrite = config.deltaOptimizeWrite)
         spark.stop()
       case None =>
         // scopt already prints help
