@@ -1,0 +1,159 @@
+# Nexmark benchmark configuration - Hudi sink with GCS storage
+# For cloud deployment on GCP GKE with Google Cloud Storage.
+
+# JARs to include (Maven coordinates downloaded during build)
+include_jars:
+  - org.apache.hudi:hudi-flink${FLINK_VERSION_SHORT}-bundle:${HUDI_VERSION}
+
+# Metric reporter (sender connects to this address)
+nexmark.metric.reporter.host: nexmark-metrics.flink-nexmark.svc.cluster.local
+nexmark.metric.reporter.port: 9098
+# Metric receiver (binds to this address, falls back to reporter.host if not set)
+nexmark.metric.reporter.receiving.host: 0.0.0.0
+nexmark.metric.monitor.delay: 0s
+
+# Workload configuration
+nexmark.workload.suite.100m.events.num: 100000000
+nexmark.workload.suite.100m.tps: 10000000
+nexmark.workload.suite.100m.queries: "q0,q1,q2,q3,q4,q5,q7,q8,q9,q10,q11,q12,q13,q14,q15,q16,q17,q18,q19,q20,q21,q22"
+nexmark.workload.suite.100m.warmup.duration: 120s
+nexmark.workload.suite.100m.warmup.events.num: 100000000
+nexmark.workload.suite.100m.warmup.tps: 10000000
+
+# Flink REST
+flink.rest.address: localhost
+flink.rest.port: 8081
+
+# Base Hudi config for GCS (anchor - filtered out by SinkDdlProvider)
+_base_hudi_gcs: &base
+  connector: hudi
+  table.type: MERGE_ON_READ
+  write.tasks: "8"
+  index.type: FLINK_STATE
+  write.operation: insert
+  hoodie.metadata.enable: "false"
+  hive_sync.enabled: "false"
+  hoodie.parquet.compression.codec: snappy
+  compaction.schedule.enabled: "false"
+  compaction.async.enabled: "false"
+  write.parquet.max.file.size: "120"
+  write.parquet.block.size: "120"
+  write.parquet.page.size: "1"
+  hoodie.parquet.small.file.limit: "0"
+  hoodie.fs.atomic_creation.support: gs
+  hadoop.fs.gs.impl: com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem
+  hadoop.fs.AbstractFileSystem.gs.impl: com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS
+  hadoop.fs.gs.auth.type: APPLICATION_DEFAULT
+
+# Hudi sink DDL configuration per query
+# Format follows nexmark's SinkDdlProvider expectations
+
+nexmark.sink.ddl.q0:
+  <<: *base
+  record.key.field: auction,bidder,dateTime
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q1:
+  <<: *base
+  record.key.field: auction,bidder,dateTime
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q2:
+  <<: *base
+  record.key.field: auction
+  ordering.fields: auction
+
+nexmark.sink.ddl.q3:
+  <<: *base
+  record.key.field: id
+  ordering.fields: id
+
+nexmark.sink.ddl.q4:
+  <<: *base
+  record.key.field: id
+  ordering.fields: id
+
+nexmark.sink.ddl.q5:
+  <<: *base
+  record.key.field: auction
+  ordering.fields: auction
+
+nexmark.sink.ddl.q7:
+  <<: *base
+  record.key.field: auction,bidder,dateTime
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q8:
+  <<: *base
+  record.key.field: id
+  ordering.fields: stime
+
+nexmark.sink.ddl.q9:
+  <<: *base
+  record.key.field: id
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q10:
+  <<: *base
+  record.key.field: auction,bidder,dateTime
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q11:
+  <<: *base
+  record.key.field: bidder,starttime
+  ordering.fields: starttime
+
+nexmark.sink.ddl.q12:
+  <<: *base
+  record.key.field: bidder,starttime
+  ordering.fields: starttime
+
+nexmark.sink.ddl.q13:
+  <<: *base
+  record.key.field: auction,bidder,dateTime
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q14:
+  <<: *base
+  record.key.field: auction,bidder,dateTime
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q15:
+  <<: *base
+  record.key.field: day
+  ordering.fields: day
+
+nexmark.sink.ddl.q16:
+  <<: *base
+  record.key.field: channel,day,minute
+  ordering.fields: day
+
+nexmark.sink.ddl.q17:
+  <<: *base
+  record.key.field: auction,day
+  ordering.fields: day
+
+nexmark.sink.ddl.q18:
+  <<: *base
+  record.key.field: bidder,auction
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q19:
+  <<: *base
+  record.key.field: auction,rank_number
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q20:
+  <<: *base
+  record.key.field: auction,bidder
+  ordering.fields: bid_dateTime
+
+nexmark.sink.ddl.q21:
+  <<: *base
+  record.key.field: auction,bidder,dateTime
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q22:
+  <<: *base
+  record.key.field: auction,bidder,dateTime
+  ordering.fields: dateTime

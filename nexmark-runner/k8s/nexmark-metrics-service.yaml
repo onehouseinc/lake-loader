@@ -1,0 +1,17 @@
+# Service to expose ProcessMetricReceiver port on JobManager
+# Allows sidecar ProcessMetricSender containers on TaskManagers to send metrics
+apiVersion: v1
+kind: Service
+metadata:
+  name: nexmark-metrics
+  namespace: flink-nexmark
+spec:
+  selector:
+    app: flink-session
+    component: jobmanager
+  ports:
+    - port: 9098
+      targetPort: 9098
+      protocol: TCP
+      name: metrics
+  type: ClusterIP

@@ -1,0 +1,27 @@
+# GCP Project Configuration
+project_id = "your-gcp-project-id"
+
+# Region and Zone
+region = "us-central1"
+zone   = "us-central1-a"
+
+# GKE Cluster Configuration
+cluster_name = "flink-nexmark-cluster"
+
+# JobManager node pool (1 x e2-standard-2, fixed size)
+jm_node_count   = 1
+jm_machine_type = "e2-standard-2" # 2 vCPU, 8GB RAM
+jm_disk_size_gb = 20
+
+# TaskManager node pool (2 x e2-standard-8, fixed size)
+tm_node_count   = 2
+tm_machine_type = "e2-standard-8" # 8 vCPU, 32GB RAM
+tm_disk_size_gb = 40              # More disk for checkpoints
+
+# GCS Bucket (must exist - not created by Terraform)
+gcs_bucket_name = "hudi-benchmark"
+
+# Flink Configuration
+flink_namespace        = "flink-nexmark"
+flink_operator_version = "1.10.0"
+cert_manager_version   = "v1.18.2"
