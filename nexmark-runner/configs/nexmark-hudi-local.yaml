@@ -1,0 +1,185 @@
+# Nexmark benchmark configuration - Hudi sink for local development
+# For local development with Kind cluster.
+
+# JARs to include (Maven coordinates downloaded during build)
+include_jars:
+  - org.apache.hudi:hudi-flink${FLINK_VERSION_SHORT}-bundle:${HUDI_VERSION}
+
+# Metric reporter (sender connects to this address)
+nexmark.metric.reporter.host: nexmark-metrics.flink-nexmark.svc.cluster.local
+nexmark.metric.reporter.port: 9098
+# Metric receiver (binds to this address, falls back to reporter.host if not set)
+nexmark.metric.reporter.receiving.host: 0.0.0.0
+nexmark.metric.monitor.delay: 0s
+
+# Workload configuration
+nexmark.workload.suite.100m.events.num: 100000000
+nexmark.workload.suite.100m.tps: 10000000
+nexmark.workload.suite.100m.queries: "q0,q1,q2,q3,q4,q5,q7,q8,q9,q10,q11,q12,q13,q14,q15,q16,q17,q18,q19,q20,q21,q22"
+nexmark.workload.suite.100m.warmup.duration: 5s
+nexmark.workload.suite.100m.warmup.events.num: 100000
+nexmark.workload.suite.100m.warmup.tps: 100000
+
+# Flink REST
+flink.rest.address: localhost
+flink.rest.port: 8081
+
+# Base Hudi config for MinIO (anchor - filtered out by SinkDdlProvider)
+_base_hudi_minio: &base
+  connector: hudi
+  table.type: MERGE_ON_READ
+  write.tasks: "8"
+  index.type: FLINK_STATE
+  write.operation: insert
+  hoodie.metadata.enable: "false"
+  hive_sync.enabled: "false"
+  hoodie.parquet.compression.codec: snappy
+  compaction.schedule.enabled: "false"
+  compaction.async.enabled: "false"
+  write.parquet.max.file.size: "120"
+  write.parquet.block.size: "120"
+  write.parquet.page.size: "1"
+  hoodie.parquet.small.file.limit: "0"
+  hoodie.fs.atomic_creation.support: s3a
+  hadoop.fs.s3a.endpoint: http://minio:9000
+  hadoop.fs.s3a.access.key: minioadmin
+  hadoop.fs.s3a.secret.key: minioadmin
+  hadoop.fs.s3a.path.style.access: "true"
+  hadoop.fs.s3a.connection.ssl.enabled: "false"
+  hadoop.fs.s3a.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+  hadoop.fs.s3a.aws.credentials.provider: org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider
+
+# Hudi sink DDL configuration per query
+# Format follows nexmark's SinkDdlProvider expectations
+
+nexmark.sink.ddl.q0:
+  <<: *base
+  path: s3a://nexmark/q0
+  record.key.field: auction,bidder,dateTime
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q1:
+  <<: *base
+  path: s3a://nexmark/q1
+  record.key.field: auction,bidder,dateTime
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q2:
+  <<: *base
+  path: s3a://nexmark/q2
+  record.key.field: auction
+  ordering.fields: auction
+
+nexmark.sink.ddl.q3:
+  <<: *base
+  path: s3a://nexmark/q3
+  record.key.field: id
+  ordering.fields: id
+
+nexmark.sink.ddl.q4:
+  <<: *base
+  path: s3a://nexmark/q4
+  record.key.field: id
+  ordering.fields: id
+
+nexmark.sink.ddl.q5:
+  <<: *base
+  path: s3a://nexmark/q5
+  record.key.field: auction
+  ordering.fields: auction
+
+nexmark.sink.ddl.q7:
+  <<: *base
+  path: s3a://nexmark/q7
+  record.key.field: auction,bidder,dateTime
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q8:
+  <<: *base
+  path: s3a://nexmark/q8
+  record.key.field: id
+  ordering.fields: stime
+
+nexmark.sink.ddl.q9:
+  <<: *base
+  path: s3a://nexmark/q9
+  record.key.field: id
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q10:
+  <<: *base
+  path: s3a://nexmark/q10
+  record.key.field: auction,bidder,dateTime
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q11:
+  <<: *base
+  path: s3a://nexmark/q11
+  record.key.field: bidder,starttime
+  ordering.fields: starttime
+
+nexmark.sink.ddl.q12:
+  <<: *base
+  path: s3a://nexmark/q12
+  record.key.field: bidder,starttime
+  ordering.fields: starttime
+
+nexmark.sink.ddl.q13:
+  <<: *base
+  path: s3a://nexmark/q13
+  record.key.field: auction,bidder,dateTime
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q14:
+  <<: *base
+  path: s3a://nexmark/q14
+  record.key.field: auction,bidder,dateTime
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q15:
+  <<: *base
+  path: s3a://nexmark/q15
+  record.key.field: day
+  ordering.fields: day
+
+nexmark.sink.ddl.q16:
+  <<: *base
+  path: s3a://nexmark/q16
+  record.key.field: channel,day,minute
+  ordering.fields: day
+
+nexmark.sink.ddl.q17:
+  <<: *base
+  path: s3a://nexmark/q17
+  record.key.field: auction,day
+  ordering.fields: day
+
+nexmark.sink.ddl.q18:
+  <<: *base
+  path: s3a://nexmark/q18
+  record.key.field: bidder,auction
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q19:
+  <<: *base
+  path: s3a://nexmark/q19
+  record.key.field: auction,rank_number
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q20:
+  <<: *base
+  path: s3a://nexmark/q20
+  record.key.field: auction,bidder
+  ordering.fields: bid_dateTime
+
+nexmark.sink.ddl.q21:
+  <<: *base
+  path: s3a://nexmark/q21
+  record.key.field: auction,bidder,dateTime
+  ordering.fields: dateTime
+
+nexmark.sink.ddl.q22:
+  <<: *base
+  path: s3a://nexmark/q22
+  record.key.field: auction,bidder,dateTime
+  ordering.fields: dateTime

@@ -1,0 +1,125 @@
+# Flink 1.18 Session Cluster for GKE
+# Config is loaded from ConfigMap mounted at /opt/nexmark/conf/ (NEXMARK_CONF_DIR)
+# GCS credentials via Workload Identity (configured in Terraform)
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: flink-session
+  namespace: flink-nexmark
+spec:
+  image: nexmark-runner:flink1.18-hudi-gcs-1.1.1
+  imagePullPolicy: IfNotPresent
+  flinkVersion: v1_18
+  serviceAccount: flink
+
+  flinkConfiguration:
+    taskmanager.numberOfTaskSlots: "4"
+    parallelism.default: "8"
+
+    # Checkpointing (Nexmark recommended: 3 min interval, exactly-once, incremental)
+    execution.checkpointing.interval: "180000"
+    execution.checkpointing.mode: EXACTLY_ONCE
+    execution.checkpointing.timeout: "300000"
+    state.backend: rocksdb
+    state.backend.incremental: "true"
+    state.backend.local-recovery: "true"
+    # Note: checkpoints dir should be overridden via helm or CLI for GCS bucket
+
+    # RocksDB tuning for high throughput
+    state.backend.rocksdb.memory.managed: "true"
+    state.backend.rocksdb.block.cache-size: "256mb"
+
+    # MiniBatch optimization (Nexmark V1 recommended)
+    table.exec.mini-batch.enabled: "true"
+    table.exec.mini-batch.allow-latency: "2s"
+    table.exec.mini-batch.size: "50000"
+
+    # Distinct aggregation optimization
+    table.optimizer.distinct-agg.split.enabled: "true"
+
+    # Disable final checkpoint for faster job completion
+    execution.checkpointing.checkpoints-after-tasks-finish.enabled: "false"
+
+    # Memory tuning
+    taskmanager.memory.process.size: "8192m"
+    taskmanager.memory.managed.fraction: "0.4"
+    jobmanager.memory.process.size: "4096m"
+    taskmanager.network.memory.fraction: "0.15"
+
+    # REST API
+    rest.address: "0.0.0.0"
+    rest.port: "8081"
+    rest.bind-address: "0.0.0.0"
+    jobmanager.rpc.address: "localhost"
+
+    # Force sql-client to use remote execution target
+    execution.target: "remote"
+
+    # GCS authentication via Workload Identity
+    gs.auth.type: APPLICATION_DEFAULT
+
+  jobManager:
+    resource:
+      memory: "4096m"
+      cpu: 2
+    podTemplate:
+      spec:
+        containers:
+          - name: flink-main-container
+            ports:
+              - containerPort: 9098
+                name: metrics
+                protocol: TCP
+
+  taskManager:
+    resource:
+      memory: "8192m"
+      cpu: 4
+    replicas: 2
+    podTemplate:
+      spec:
+        shareProcessNamespace: true
+        containers:
+          - name: flink-main-container
+            volumeMounts:
+              - name: shared-tmp
+                mountPath: /tmp
+          - name: metrics-sender
+            image: nexmark-runner:flink1.18-hudi-gcs-1.1.1
+            imagePullPolicy: IfNotPresent
+            command: ["/bin/bash", "-c"]
+            args:
+              - |
+                sleep 10
+                java -cp "/opt/nexmark/lib/*:/opt/flink/lib/*" \
+                  com.github.nexmark.flink.metric.process.ProcessMetricSender
+            volumeMounts:
+              - name: nexmark-config
+                mountPath: /opt/nexmark/conf/nexmark.yaml
+                subPath: nexmark.yaml
+              - name: shared-tmp
+                mountPath: /tmp
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "100m"
+              limits:
+                memory: "512Mi"
+                cpu: "200m"
+
+  podTemplate:
+    spec:
+      containers:
+        - name: flink-main-container
+          volumeMounts:
+            - name: nexmark-config
+              mountPath: /opt/nexmark/conf/nexmark.yaml
+              subPath: nexmark.yaml
+      volumes:
+        - name: nexmark-config
+          configMap:
+            name: nexmark-config
+        - name: shared-tmp
+          emptyDir: {}
+
+  mode: standalone

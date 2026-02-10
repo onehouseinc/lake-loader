@@ -1,0 +1,33 @@
+name: Nexmark CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'nexmark/**'
+      - '.github/workflows/nexmark.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'nexmark/**'
+      - '.github/workflows/nexmark.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build and test
+        run: |
+          cd nexmark
+          mvn -B verify
