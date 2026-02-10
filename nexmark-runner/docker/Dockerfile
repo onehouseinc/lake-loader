@@ -65,8 +65,8 @@ RUN cd /tmp/nexmark && \
 #   2. Maven coordinates (groupId:artifactId:version): downloaded from Maven Central
 # Variables like ${FLINK_VERSION_SHORT}, ${HUDI_VERSION} are resolved against env vars
 # If NEXMARK_CONFIG_FILE is empty, no additional JARs are included (blackhole mode)
-COPY docker/jars/ /tmp/build-jars/
-COPY configs/ /tmp/build-configs/
+COPY nexmark-runner/docker/jars/ /tmp/build-jars/
+COPY nexmark-runner/configs/ /tmp/build-configs/
 RUN set -e && \
     FLINK_VERSION_SHORT=$(echo "$FLINK_VERSION" | cut -d. -f1,2) && \
     export FLINK_VERSION_SHORT FLINK_VERSION HUDI_VERSION && \
