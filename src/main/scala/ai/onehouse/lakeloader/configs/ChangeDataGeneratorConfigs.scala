@@ -20,7 +20,7 @@ import ai.onehouse.lakeloader.configs.UpdatePatterns.UpdatePatterns
 case class DatagenConfig(
     outputPath: String = "",
     numberOfRounds: Int = 10,
-    numberRecordsPerRound: Long = 1000000,
+    roundsDistribution: List[Long] = List(1000000L),
     numberColumns: Int = 10,
     recordSize: Int = 1024,
     updateRatio: Double = 0.5f,

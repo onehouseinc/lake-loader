@@ -35,9 +35,10 @@ object ChangeDataGeneratorParser {
         .action((x, c) => c.copy(numberOfRounds = x))
         .text("Number of rounds of incremental change data to generate. Default: 10")
 
-      opt[Long]("number-records-per-round")
-        .action((x, c) => c.copy(numberRecordsPerRound = x))
-        .text("Number of columns in schema of generated data. Default: 1000000")
+      opt[String]("number-records-per-round")
+        .action((x, c) => c.copy(roundsDistribution = x.split(",").map(_.trim.toLong).toList))
+        .text("Comma-separated list of record counts per round, or a single value for all rounds. " +
+          "If fewer values than rounds, the last value is repeated. Default: 1000000")
 
       opt[Int]("number-columns")
         .action((x, c) => c.copy(numberColumns = x))
