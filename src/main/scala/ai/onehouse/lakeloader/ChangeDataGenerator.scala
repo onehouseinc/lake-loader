@@ -285,10 +285,19 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     }
 
     val newTs = System.currentTimeMillis()
-    // Update the timestamp and current round for the updated record.
-    val finalUpdatedDf = rawUpdatesDF
-      .withColumn("ts", lit(newTs))
-      .withColumn("round", lit(currentRound))
+    // Regenerate all non-key columns with new values so updates have different data
+    val finalUpdatedDf = rawUpdatesDF.columns.foldLeft(rawUpdatesDF) { (df, colName) =>
+      colName match {
+        case "key" | "partition" => df
+        case "round" => df.withColumn(colName, lit(currentRound))
+        case "ts" => df.withColumn(colName, lit(newTs))
+        case c if c.startsWith("textField") => df.withColumn(colName, expr("uuid()"))
+        case c if c.startsWith("longField") => df.withColumn(colName, (rand() * Long.MaxValue).cast(LongType))
+        case c if c.startsWith("decimalField") => df.withColumn(colName, rand().cast(FloatType))
+        case c if c.startsWith("intField") => df.withColumn(colName, (rand() * Int.MaxValue).cast(IntegerType))
+        case _ => df
+      }
+    }
 
     // NOTE: Applying this limit does not guarantee that exactly N elements will be contained in the
     //       returned dataset, since it might not be applying Spark's [[GlobalLimit]] operator.
