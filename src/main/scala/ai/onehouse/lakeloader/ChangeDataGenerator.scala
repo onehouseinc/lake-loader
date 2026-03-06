@@ -386,13 +386,15 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     rankedDF = rankedDF.filter($"key_rank" === 1).drop(s"key_rank")
     rankedDF.persist()
     val totalRecords = rankedDF.count()
+    // Oversample by 10% to compensate for Spark's probabilistic sampling, then limit to exact count
+    val samplingRatio = Math.min(1.0, numUpdateRecords.toDouble / totalRecords.toDouble * 1.1)
     println(
-      s"Picking random updates for round: # $currentRound: from total records = $totalRecords")
+      s"Picking random updates for round: # $currentRound: from total records = $totalRecords, " +
+        s"targeted update records = $numUpdateRecords, sampling ratio = $samplingRatio")
 
-    val samplingRatio = Math.min(1.0, numUpdateRecords.toDouble / totalRecords.toDouble)
     val finalDF = rankedDF
-      // NOTE: We should not be filtering out records as it will reduce number of updated records we sample
       .sample(samplingRatio)
+      .limit(numUpdateRecords.toInt)
     finalDF
   }
 
@@ -476,10 +478,10 @@ object ChangeDataGenerator {
       end: Long): RDD[Long] = {
     val partitionSize = (end - start) / targetParallelism
     spark.sparkContext
-      .parallelize(0 to targetParallelism, targetParallelism)
+      .parallelize(0 until targetParallelism, targetParallelism)
       .mapPartitions { it =>
         val partitionStart = it.next() * partitionSize
-        (partitionStart to partitionStart + partitionSize).iterator
+        (partitionStart until partitionStart + partitionSize).iterator
       }
   }
 }
