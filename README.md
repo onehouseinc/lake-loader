@@ -74,8 +74,7 @@ spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator <jar-file> [opti
 |-----------------------|----------------------------------------|----------------|------------|-----------------------------------------------------------------|
 | outputPath            | `-p`, `--path`                         | String         | *required* | Output path where generated change data will be stored          |
 | numRounds             | `--number-rounds`                      | Int            | 10         | Number of rounds of incremental change data to generate         |
-| N/A (CLI only)        | `--number-records-per-round`           | Long           | 1000000    | Number of records per round (CLI only, uniform across rounds)   |
-| roundsDistribution    | N/A (CLI only)                         | List[Long]     | *computed* | Number of records per round (Scala API only, per-round control) |
+| roundsDistribution    | `--number-records-per-round`           | List[Long]     | 1000000    | Comma-separated record counts per round. A single value applies to all rounds; if fewer values than rounds, the last value is repeated. |
 | numColumns            | `--number-columns`                     | Int            | 10         | Number of columns in schema of generated data (min: 5)          |
 | recordSize            | `--record-size`                        | Int            | 1024       | Record size of generated data in bytes                          |
 | updateRatio           | `--update-ratio`                       | Double         | 0.5        | Ratio of updates to total records (0.0-1.0)                     |
@@ -89,7 +88,7 @@ spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator <jar-file> [opti
 | zipfianShape          | `--zipfian-shape`                      | Double         | 2.93       | Shape parameter for Zipf distribution (higher = more skewed)    |
 
 **Notes**:
-* **Record count specification**: CLI uses `--number-records-per-round` which applies a uniform count across all rounds. Scala API uses `roundsDistribution` parameter which allows specifying different record counts for each round (e.g., `List(1000000000L, 10000000L, 10000000L, ...)` for a large initial load followed by smaller incremental rounds).
+* **Record count specification**: `--number-records-per-round` accepts a comma-separated list of record counts (e.g., `22000000,22000` for a large initial load followed by smaller incremental rounds). A single value applies uniformly to all rounds. If fewer values are provided than the number of rounds, the last value is repeated for remaining rounds.
 
 ## IncrementalLoader Parameters
 

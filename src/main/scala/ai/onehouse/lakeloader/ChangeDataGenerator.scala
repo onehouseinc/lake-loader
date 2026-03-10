@@ -449,7 +449,11 @@ object ChangeDataGenerator {
         val changeDataGenerator = new ChangeDataGenerator(spark, config.numberOfRounds)
         changeDataGenerator.generateWorkload(
           config.outputPath,
-          roundsDistribution = List.fill(config.numberOfRounds)(config.numberRecordsPerRound),
+          roundsDistribution = {
+            val dist = config.roundsDistribution
+            if (dist.size >= config.numberOfRounds) dist.take(config.numberOfRounds)
+            else dist ++ List.fill(config.numberOfRounds - dist.size)(dist.last)
+          },
           numColumns = config.numberColumns,
           recordSize = config.recordSize,
           updateRatio = config.updateRatio,
