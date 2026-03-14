@@ -23,8 +23,8 @@ import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.ReadableConfig;
 
-import com.github.nexmark.flink.utils.NexmarkUtils;
 import com.github.nexmark.flink.NexmarkConfiguration;
+import com.github.nexmark.flink.utils.NexmarkUtils;
 
 import java.time.Duration;
 
@@ -174,6 +174,46 @@ public class NexmarkSourceOptions {
 			.booleanType()
 			.defaultValue(true);
 
+	/**
+	 * @see NexmarkConfiguration#partitionKeyField
+	 */
+	public static final ConfigOption<String> PARTITION_KEY_FIELD = ConfigOptions
+			.key("partition.key.field")
+			.stringType()
+			.defaultValue("timestamp");
+
+	/**
+	 * @see NexmarkConfiguration#partitionDistributionMode
+	 */
+	public static final ConfigOption<PartitionDistributionMode> PARTITION_DISTRIBUTION_MODE = ConfigOptions
+			.key("partition.distribution.mode")
+			.enumType(PartitionDistributionMode.class)
+			.defaultValue(PartitionDistributionMode.UNIFORM);
+
+	/**
+	 * @see NexmarkConfiguration#partitionValues
+	 */
+	public static final ConfigOption<String> PARTITION_VALUES = ConfigOptions
+			.key("partition.values")
+			.stringType()
+			.defaultValue("");
+
+	/**
+	 * @see NexmarkConfiguration#partitionNumber
+	 */
+	public static final ConfigOption<Integer> PARTITION_NUMBER = ConfigOptions
+			.key("partition.number")
+			.intType()
+			.defaultValue(0);
+
+	/**
+	 * @see NexmarkConfiguration#partitionDistribution
+	 */
+	public static final ConfigOption<String> PARTITION_DISTRIBUTION = ConfigOptions
+			.key("partition.distribution")
+			.stringType()
+			.defaultValue("");
+
 	public static NexmarkConfiguration convertToNexmarkConfiguration(ReadableConfig config) {
 		NexmarkConfiguration nexmarkConf = new NexmarkConfiguration();
 		nexmarkConf.rateShape = config.get(RATE_SHAPE);
@@ -194,6 +234,11 @@ public class NexmarkSourceOptions {
 		nexmarkConf.isSourceKeepAlive = config.get(KEEP_ALIVE);
 		nexmarkConf.stopAtEvent = config.get(STOP_AT);
 		nexmarkConf.maxEmitSpeed = config.get(MAX_EMIT_SPEED);
+		nexmarkConf.partitionKeyField = config.get(PARTITION_KEY_FIELD);
+		nexmarkConf.partitionDistributionMode = config.get(PARTITION_DISTRIBUTION_MODE);
+		nexmarkConf.partitionValues = config.get(PARTITION_VALUES);
+		nexmarkConf.partitionNumber = config.get(PARTITION_NUMBER);
+		nexmarkConf.partitionDistribution = config.get(PARTITION_DISTRIBUTION);
 
 		return nexmarkConf;
 	}

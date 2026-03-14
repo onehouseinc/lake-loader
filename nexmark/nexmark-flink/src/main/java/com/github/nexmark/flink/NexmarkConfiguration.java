@@ -21,6 +21,7 @@ package com.github.nexmark.flink;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.JsonProcessingException;
 
+import com.github.nexmark.flink.source.PartitionDistributionMode;
 import com.github.nexmark.flink.utils.NexmarkUtils;
 
 import java.io.Serializable;
@@ -151,6 +152,36 @@ public class NexmarkConfiguration implements Serializable {
 	 */
 	@JsonProperty public boolean maxEmitSpeed = true;
 
+	/**
+	 * Name of the partition key column. Default "timestamp". When non-empty, the source
+	 * adds this column with epoch milliseconds (BIGINT) for partitioning.
+	 */
+	@JsonProperty public String partitionKeyField = "timestamp";
+
+	/**
+	 * How partition values are assigned: UNIFORM, LATEST, RANDOM, SKEWED (Zipfian), or CUSTOM (explicit weights).
+	 * See {@link PartitionDistributionMode}.
+	 */
+	@JsonProperty public PartitionDistributionMode partitionDistributionMode = PartitionDistributionMode.UNIFORM;
+
+	/**
+	 * Comma-separated list of partition values (e.g. "2025-02-25,2025-02-26,2025-02-27").
+	 * Used when {@link #partitionNumber} is 0. For LATEST, use a single value (the active partition).
+	 */
+	@JsonProperty public String partitionValues = "";
+
+	/**
+	 * When > 0, partition values are generated from the current date (UTC) going back this many days:
+	 * today, today-1, ..., today-(partitionNumber-1). Overrides {@link #partitionValues} when set.
+	 */
+	@JsonProperty public int partitionNumber = 0;
+
+	/**
+	 * For SKEWED mode: Zipfian only ("zipfian" or "zipfian:exponent"). For CUSTOM mode: "value1=weight1,value2=weight2,..." or weights-only "80,15,5,...".
+	 * Weights are relative. Also used when no mode is set but this string is non-empty (backward compatibility).
+	 */
+	@JsonProperty public String partitionDistribution = "";
+
 	/** Return full description as a string. */
 	@Override
 	public String toString() {
@@ -196,7 +227,12 @@ public class NexmarkConfiguration implements Serializable {
 			rateUnit == that.rateUnit &&
 			isSourceKeepAlive == that.isSourceKeepAlive &&
 			stopAtEvent == that.stopAtEvent &&
-			maxEmitSpeed == that.maxEmitSpeed;
+			maxEmitSpeed == that.maxEmitSpeed &&
+			Objects.equals(partitionKeyField, that.partitionKeyField) &&
+			partitionDistributionMode == that.partitionDistributionMode &&
+			Objects.equals(partitionValues, that.partitionValues) &&
+			partitionNumber == that.partitionNumber &&
+			Objects.equals(partitionDistribution, that.partitionDistribution);
 	}
 
 	@Override
@@ -232,6 +268,11 @@ public class NexmarkConfiguration implements Serializable {
 			outOfOrderGroupSize,
 			isSourceKeepAlive,
 			stopAtEvent,
-			maxEmitSpeed);
+			maxEmitSpeed,
+			partitionKeyField,
+			partitionDistributionMode,
+			partitionValues,
+			partitionNumber,
+			partitionDistribution);
 	}
 }
