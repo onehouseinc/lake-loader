@@ -38,6 +38,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
 public class RowDataEventDeserializer implements EventDeserializer<RowData> {
@@ -262,7 +263,7 @@ public class RowDataEventDeserializer implements EventDeserializer<RowData> {
 	private long computePartitionValueMs(Event event) {
 		String dateStr = null;
 		if (effectiveMode == PartitionDistributionMode.SKEWED && partitionValuesList != null && cumulativeZipfian != null && cumulativeZipfian.length > 0) {
-			int hash = eventHash(event);
+			int hash = event.hashCode();
 			double u = (hash & 0x7FFFFFFFL) / (Integer.MAX_VALUE + 1.0);
 			int idx = 0;
 			for (int i = 0; i < cumulativeZipfian.length; i++) {
@@ -274,7 +275,7 @@ public class RowDataEventDeserializer implements EventDeserializer<RowData> {
 			}
 			dateStr = partitionValuesList.get(Math.min(idx, partitionValuesList.size() - 1));
 		} else if (effectiveMode == PartitionDistributionMode.CUSTOM && partitionValuesList != null && cumulativeWeights != null && cumulativeWeights.length > 0) {
-			int hash = eventHash(event);
+			int hash = event.hashCode();
 			int total = cumulativeWeights[cumulativeWeights.length - 1];
 			int bucket = Math.floorMod(hash, total);
 			for (int i = 0; i < cumulativeWeights.length; i++) {
@@ -286,9 +287,11 @@ public class RowDataEventDeserializer implements EventDeserializer<RowData> {
 			if (dateStr == null) dateStr = partitionValuesList.get(partitionValuesList.size() - 1);
 		} else if (effectiveMode == PartitionDistributionMode.LATEST && partitionValuesList != null && !partitionValuesList.isEmpty()) {
 			dateStr = partitionValuesList.get(0);
-		} else if ((effectiveMode == PartitionDistributionMode.UNIFORM || effectiveMode == PartitionDistributionMode.RANDOM) && partitionValuesList != null && !partitionValuesList.isEmpty()) {
-			int hash = eventHash(event);
-			int idx = Math.floorMod(hash, partitionValuesList.size());
+		} else if (effectiveMode == PartitionDistributionMode.UNIFORM && partitionValuesList != null && !partitionValuesList.isEmpty()) {
+			int idx = Math.floorMod(event.hashCode(), partitionValuesList.size());
+			dateStr = partitionValuesList.get(idx);
+		} else if (effectiveMode == PartitionDistributionMode.RANDOM && partitionValuesList != null && !partitionValuesList.isEmpty()) {
+			int idx = ThreadLocalRandom.current().nextInt(partitionValuesList.size());
 			dateStr = partitionValuesList.get(idx);
 		}
 		if (dateStr != null) {
@@ -315,20 +318,6 @@ public class RowDataEventDeserializer implements EventDeserializer<RowData> {
 		if (event.newAuction != null) return event.newAuction.dateTime;
 		if (event.bid != null) return event.bid.dateTime;
 		return Instant.EPOCH;
-	}
-
-	private static int eventHash(Event event) {
-		int h = event.type.value;
-		if (event.newPerson != null) {
-			h = 31 * h + Long.hashCode(event.newPerson.id);
-		} else if (event.newAuction != null) {
-			h = 31 * h + Long.hashCode(event.newAuction.id);
-		} else if (event.bid != null) {
-			h = 31 * h + Long.hashCode(event.bid.auction);
-			h = 31 * h + Long.hashCode(event.bid.bidder);
-			h = 31 * h + Long.hashCode(event.bid.price);
-		}
-		return h;
 	}
 
 	private RowData convertPerson(Person person) {

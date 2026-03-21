@@ -63,6 +63,17 @@ public class RowDataEventDeserializerTest {
 	}
 
 	@Test
+	public void testDefaultConfigProducesNoPartitionColumn() {
+		// Default NexmarkConfiguration has partitionKeyField = "" so source is 4-column by default
+		NexmarkConfiguration conf = new NexmarkConfiguration();
+		GeneratorConfig config = new GeneratorConfig(conf, System.currentTimeMillis(), 1, 100, -1L, 1);
+		RowDataEventDeserializer deserializer = new RowDataEventDeserializer(config);
+		Event event = new Event(new Person(1L, "a", "b", "c", "d", "e", Instant.EPOCH, ""));
+		RowData row = deserializer.deserialize(event);
+		assertEquals(4, row.getArity());
+	}
+
+	@Test
 	public void testPartitionColumnFallbackFromEventTimestamp() {
 		NexmarkConfiguration conf = new NexmarkConfiguration();
 		conf.partitionKeyField = "timestamp";
@@ -108,6 +119,22 @@ public class RowDataEventDeserializerTest {
 			RowData row = deserializer.deserialize(event);
 			long partitionMs = row.getLong(4);
 			assertTrue(partitionMs == expected[0] || partitionMs == expected[1] || partitionMs == expected[2]);
+		}
+	}
+
+	@Test
+	public void testUniformModeIsDeterministic() {
+		// Same event must always land in the same partition (hash-based, not random)
+		NexmarkConfiguration conf = new NexmarkConfiguration();
+		conf.partitionKeyField = "timestamp";
+		conf.partitionDistributionMode = PartitionDistributionMode.UNIFORM;
+		conf.partitionValues = "2025-02-27,2025-02-26,2025-02-25";
+		GeneratorConfig config = new GeneratorConfig(conf, System.currentTimeMillis(), 1, 100, -1L, 1);
+		RowDataEventDeserializer deserializer = new RowDataEventDeserializer(config);
+		Event event = new Event(new Person(42L, "a", "b", "c", "d", "e", Instant.EPOCH, ""));
+		long first = deserializer.deserialize(event).getLong(4);
+		for (int i = 0; i < 10; i++) {
+			assertEquals(first, deserializer.deserialize(event).getLong(4));
 		}
 	}
 

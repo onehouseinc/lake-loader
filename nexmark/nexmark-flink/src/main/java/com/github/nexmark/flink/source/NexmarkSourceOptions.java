@@ -180,7 +180,7 @@ public class NexmarkSourceOptions {
 	public static final ConfigOption<String> PARTITION_KEY_FIELD = ConfigOptions
 			.key("partition.key.field")
 			.stringType()
-			.defaultValue("timestamp");
+			.defaultValue("");
 
 	/**
 	 * @see NexmarkConfiguration#partitionDistributionMode

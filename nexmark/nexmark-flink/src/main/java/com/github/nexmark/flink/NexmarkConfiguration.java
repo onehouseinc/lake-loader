@@ -153,10 +153,11 @@ public class NexmarkConfiguration implements Serializable {
 	@JsonProperty public boolean maxEmitSpeed = true;
 
 	/**
-	 * Name of the partition key column. Default "timestamp". When non-empty, the source
-	 * adds this column with epoch milliseconds (BIGINT) for partitioning.
+	 * Name of the partition key column. Default empty (partition column disabled).
+	 * Set to e.g. {@code "timestamp"} to add a BIGINT epoch-ms partition column to the source output.
+	 * When non-empty, the source adds this column as the last field (BIGINT, epoch milliseconds).
 	 */
-	@JsonProperty public String partitionKeyField = "timestamp";
+	@JsonProperty public String partitionKeyField = "";
 
 	/**
 	 * How partition values are assigned: UNIFORM, LATEST, RANDOM, SKEWED (Zipfian), or CUSTOM (explicit weights).
