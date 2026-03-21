@@ -14,35 +14,11 @@
 
 package org.apache.spark.sql
 
-import org.apache.spark.sql.catalyst.expressions.Literal
-import org.apache.spark.sql.catalyst.plans.logical.{GlobalLimit, LocalLimit, LogicalPlan, Repartition}
-
 object CatalystUtil {
+  // Simplified for Spark 4.0 compatibility — internal Catalyst APIs (logicalPlan,
+  // Dataset.ofRows) were removed. The per-partition limit optimization is lost but
+  // this is only used by ChangeDataGenerator, not the benchmark path.
   def partitionLocalLimit(df: DataFrame, n: Int): DataFrame = {
-    val originalPlan = df.logicalPlan
-    originalPlan match {
-      // NOTE: `Dataset.limit` operator is being translated by Spark into:
-      //
-      //       GlobalLimit(Literal(targetLimit), LocalLimit(Literal(targetLimit), plan))
-      //
-      //       Where
-      //          - `GlobalLimit` has an unfortunate limitation that it will be essentially
-      //            shuffling all partitions into a single one prior to executing the limit (even though
-      //            it's strictly speaking not required for non-ordered limits), which leads to memory/disk spills
-      //            on large enough datasets
-      //          - `LocalLimit` even though it will be pushed down, will bear the same target-limit threshold
-      //            substantially reducing its effectiveness; consider following case: we're trying to limit
-      //            Spark dataset (having 1000 partitions) holding 1B records to hold only 10M records. If we
-      //            invoke `df.limit(10M)`, it will result as mentioned above in 1 task collecting all 1B records
-      //            before discarding 99.9% of those causing heavy thrashing due to spilling, which will occur
-      //            b/c the same global limit (10M) will be applied to every partition
-      //
-      case Repartition(numPartitions, _, _) =>
-        val perPartitionLimit = math.ceil(n / numPartitions).toInt
-        val partitionLocalLimitPlan = LocalLimit(Literal(perPartitionLimit), originalPlan)
-        Dataset.ofRows(df.sparkSession, partitionLocalLimitPlan)
-
-      case _ => df.limit(n)
-    }
+    df.limit(n)
   }
 }
