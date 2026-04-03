@@ -19,6 +19,7 @@ import ai.onehouse.lakeloader.configs.{DatagenConfig, KeyTypes, UpdatePatterns}
 import ai.onehouse.lakeloader.configs.KeyTypes.KeyType
 import ai.onehouse.lakeloader.configs.UpdatePatterns.{Uniform, UpdatePatterns, Zipf}
 import ai.onehouse.lakeloader.parser.ChangeDataGeneratorParser
+import ai.onehouse.lakeloader.utils.{AvroSchemaUtils, ComplexDataGenerator, MathUtils, StringUtils}
 import org.apache.hadoop.fs.Path
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.CatalystUtil.partitionLocalLimit
@@ -26,7 +27,6 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.{DataFrame, Row, SaveMode, SparkSession}
 import ai.onehouse.lakeloader.utils.StringUtils.lineSepBold
-import ai.onehouse.lakeloader.utils.{MathUtils, StringUtils}
 
 import java.io.Serializable
 import java.time.LocalDate
@@ -80,47 +80,14 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       partitionDistributionCDF: List[Double],
       keyType: KeyType,
       schema: StructType) = {
-    val ts = System.currentTimeMillis()
-    // To induce (semi-) ordering on the keys we simply prefix its random part (UUID) w/ a ts;
-    //
-    // NOTE: That even though round is preceding the timestamp, it's a constant value for all
-    //       records in a batch and therefore doesn't affect the ordering
-    val key = keyType match {
-      case KeyTypes.TemporallyOrdered =>
-        s"${ts}-${randomUUID()}-${"%03d".format(round)}"
-      case KeyTypes.Random =>
-        s"${randomUUID()}-${"%03d".format(round)}"
-      case _ => throw new UnsupportedOperationException(s"$keyType not supported")
-    }
-
-    val sizeFactor: Int = Math.max(size / schema.fields.size, 1)
-    val fieldValues = schema.fields.map(field => {
-      field.name match {
-        case "key" => key
-        case "partition" =>
-          partitionPaths(MathUtils.sampleFromCDF(partitionDistributionCDF, random.nextDouble()))
-        case "round" => round
-        case "ts" => ts
-        case randomField =>
-          if (randomField.startsWith("textField")) {
-            StringUtils.generateRandomString(sizeFactor + random.nextInt(sizeFactor))
-          } else if (randomField.startsWith("decimalField")) {
-            random.nextFloat()
-          } else if (randomField.startsWith("longField")) {
-            random.nextLong()
-          } else if (randomField.startsWith("intField")) {
-            random.nextInt()
-          } else if (randomField.startsWith("arrayField")) {
-            (0 until size / sizeFactor / 5).toArray
-          } else if (randomField.startsWith("mapField")) {
-            (0 until size / sizeFactor / 2 / 40).map(_ => (randomUUID(), random.nextInt())).toMap
-          } else {
-            throw new IllegalArgumentException(s"${field.name} not defined in schema.")
-          }
-      }
-    })
-
-    Row.fromSeq(fieldValues)
+    ComplexDataGenerator.generateRow(
+      schema,
+      round,
+      partitionPaths,
+      partitionDistributionCDF,
+      keyType,
+      size,
+      random)
   }
 
   /**
@@ -154,14 +121,17 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       startRound: Int = 0,
       updatePatterns: UpdatePatterns = UpdatePatterns.Uniform,
       numPartitionsToUpdate: Int = -1,
-      zipfianShape: Double = 2.93): Unit = {
+      zipfianShape: Double = 2.93,
+      avroSchemaPath: Option[String] = None): Unit = {
     require(path.nonEmpty, "Path cannot be empty")
     require(
       totalPartitions != -1 || partitionDistributionMatrixOpt.isDefined,
       "Either set the total partitions or configure the partitionDistributionMatrixOpt")
-    require(
-      numColumns >= 5,
-      "The number of columns needs to be at least 5 since we need at least 4 cols for key, partition, round, and timestamp.")
+    if (avroSchemaPath.isEmpty) {
+      require(
+        numColumns >= 5,
+        "The number of columns needs to be at least 5 since we need at least 4 cols for key, partition, round, and timestamp.")
+    }
     require(
       numPartitionsToUpdate <= totalPartitions,
       "The number of partitions to update should be lower than the total partitions")
@@ -173,7 +143,12 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       genPartitionsDistributionMatrix(totalPartitions, partitionDistributionMatrixOpt)
 
     val partitionPaths = genDateBasedPartitionValues(targetPartitionsCount)
-    val schema = getSchema(numColumns)
+    val schema = avroSchemaPath match {
+      case Some(schemaPath) =>
+        AvroSchemaUtils.loadSchemaFromAvscFile(schemaPath, spark.sparkContext.hadoopConfiguration)
+      case None =>
+        getSchema(numColumns)
+    }
 
     ////////////////////////////////////////
     // Generating workload
@@ -285,17 +260,28 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     }
 
     val newTs = System.currentTimeMillis()
-    // Regenerate all non-key columns with new values so updates have different data
-    val finalUpdatedDf = rawUpdatesDF.columns.foldLeft(rawUpdatesDF) { (df, colName) =>
-      colName match {
+    val updateSchema = rawUpdatesDF.schema
+    // Regenerate all non-key scalar columns with new values so updates have different data.
+    // Complex types (StructType, ArrayType, MapType) are left unchanged — sufficient for benchmarking.
+    val finalUpdatedDf = updateSchema.fields.foldLeft(rawUpdatesDF) { (df, field) =>
+      field.name match {
         case "key" | "partition" => df
-        case "round" => df.withColumn(colName, lit(currentRound))
-        case "ts" => df.withColumn(colName, lit(newTs))
-        case c if c.startsWith("textField") => df.withColumn(colName, expr("uuid()"))
-        case c if c.startsWith("longField") => df.withColumn(colName, (rand() * Long.MaxValue).cast(LongType))
-        case c if c.startsWith("decimalField") => df.withColumn(colName, rand().cast(FloatType))
-        case c if c.startsWith("intField") => df.withColumn(colName, (rand() * Int.MaxValue).cast(IntegerType))
-        case _ => df
+        case "round" => df.withColumn(field.name, lit(currentRound))
+        case "ts" => df.withColumn(field.name, lit(newTs))
+        case _ =>
+          field.dataType match {
+            case StringType => df.withColumn(field.name, expr("uuid()"))
+            case LongType => df.withColumn(field.name, (rand() * Long.MaxValue).cast(LongType))
+            case IntegerType => df.withColumn(field.name, (rand() * Int.MaxValue).cast(IntegerType))
+            case FloatType => df.withColumn(field.name, rand().cast(FloatType))
+            case DoubleType => df.withColumn(field.name, rand().cast(DoubleType))
+            case BooleanType => df.withColumn(field.name, (rand() > 0.5).cast(BooleanType))
+            case DateType => df.withColumn(field.name, current_date())
+            case TimestampType => df.withColumn(field.name, current_timestamp())
+            case dt: DecimalType =>
+              df.withColumn(field.name, (rand() * Math.pow(10, dt.precision - dt.scale)).cast(dt))
+            case _ => df // leave complex types (StructType, ArrayType, MapType, BinaryType) unchanged
+          }
       }
     }
 
@@ -465,7 +451,8 @@ object ChangeDataGenerator {
           startRound = config.startRound,
           updatePatterns = config.updatePattern,
           numPartitionsToUpdate = config.numPartitionsToUpdate,
-          zipfianShape = config.zipfianShape)
+          zipfianShape = config.zipfianShape,
+          avroSchemaPath = config.avroSchemaPath)
 
         spark.stop()
 

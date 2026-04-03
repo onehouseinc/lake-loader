@@ -31,7 +31,8 @@ case class DatagenConfig(
     keyType: KeyType = KeyTypes.Random,
     updatePattern: UpdatePatterns = UpdatePatterns.Uniform,
     numPartitionsToUpdate: Int = -1,
-    zipfianShape: Double = 2.93)
+    zipfianShape: Double = 2.93,
+    avroSchemaPath: Option[String] = None)
 
 object KeyTypes extends Enumeration {
   type KeyType = Value

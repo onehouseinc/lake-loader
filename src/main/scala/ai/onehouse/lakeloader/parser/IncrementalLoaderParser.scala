@@ -15,7 +15,6 @@
 package ai.onehouse.lakeloader.parser
 
 import ai.onehouse.lakeloader.configs.{ApiType, LoadConfig, MergeMode, OperationType, StorageFormat, WriteMode}
-import ai.onehouse.lakeloader.ChangeDataGenerator.{PARTITION_PATH_FIELD_NAME, RECORD_KEY_FIELD_NAME}
 
 object IncrementalLoaderParser {
 
@@ -129,6 +128,14 @@ object IncrementalLoaderParser {
     opt[Boolean]("delta-optimize-write")
       .action((x, c) => c.copy(deltaOptimizeWrite = x))
       .text("Enable optimized writes for Delta Lake merge operations on partitioned tables. Balances data distribution to avoid skewed large files. Default: true")
+
+    opt[String]("record-key-field")
+      .action((x, c) => c.copy(recordKeyField = x))
+      .text("Field name to use as the record key. Default: key")
+
+    opt[String]("partition-path-field")
+      .action((x, c) => c.copy(partitionPathField = x))
+      .text("Field name to use as the partition path. Default: partition")
   }
 
   /**
@@ -136,9 +143,9 @@ object IncrementalLoaderParser {
    */
   def getMergeConditionColumns(config: LoadConfig): Seq[String] = {
     val baseColumns = if (config.nonPartitioned) {
-      Seq(RECORD_KEY_FIELD_NAME)
+      Seq(config.recordKeyField)
     } else {
-      Seq(RECORD_KEY_FIELD_NAME, PARTITION_PATH_FIELD_NAME)
+      Seq(config.recordKeyField, config.partitionPathField)
     }
     baseColumns ++ config.additionalMergeConditionColumns
   }

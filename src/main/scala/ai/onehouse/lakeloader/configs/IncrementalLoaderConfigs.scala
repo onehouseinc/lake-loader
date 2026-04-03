@@ -192,4 +192,6 @@ case class LoadConfig(
                        maxRetries: Int = 5,
                        compactionMinFileSize: Long = 100 * 1024 * 1024,
                        compactionTargetFileSize: Long = 120 * 1024 * 1024,
-                       deltaOptimizeWrite: Boolean = true)
+                       deltaOptimizeWrite: Boolean = true,
+                       recordKeyField: String = "key",
+                       partitionPathField: String = "partition")
