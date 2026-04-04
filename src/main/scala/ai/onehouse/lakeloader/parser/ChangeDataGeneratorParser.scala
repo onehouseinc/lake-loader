@@ -84,5 +84,10 @@ object ChangeDataGeneratorParser {
       opt[Double]("zipfian-shape")
         .action((x, c) => c.copy(zipfianShape = x))
         .text("Shape parameter for zipfian distribution (higher = more skewed). Default: 2.93")
+
+      opt[String]("avro-schema")
+        .action((x, c) => c.copy(avroSchemaPath = Some(x)))
+        .text("Path to an Avro schema file (.avsc). When provided, data is generated matching this schema " +
+          "instead of the default flat schema. The --number-columns parameter is ignored.")
     }
 }

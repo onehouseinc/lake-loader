@@ -56,7 +56,9 @@ class IncrementalLoader(
                              writeMode: WriteMode = WriteMode.CopyOnWrite,
                              roundNo: Int,
                              asyncCompactionEnabled: Boolean = false,
-                             compactionTargetFileSize: Long = 120 * 1024 * 1024): Unit = {
+                             compactionTargetFileSize: Long = 120 * 1024 * 1024,
+                             recordKeyField: String = RECORD_KEY_FIELD_NAME,
+                             partitionPathField: String = PARTITION_PATH_FIELD_NAME): Unit = {
 
     val tableName = format match {
       case Hudi => genHudiTableName(scenarioId)
@@ -76,11 +78,11 @@ class IncrementalLoader(
            |USING HUDI
            |TBLPROPERTIES (
            |  type = '${writeMode.asHudiSqlWriteTableType}',
-           |  primaryKey = '$RECORD_KEY_FIELD_NAME',
+           |  primaryKey = '$recordKeyField',
            |  ${serializeOptionsForSql(opts)}
            |)
            |LOCATION '$targetPath'
-           |${if (nonPartitioned) "" else "PARTITIONED BY (partition)"}
+           |${if (nonPartitioned) "" else s"PARTITIONED BY ($partitionPathField)"}
            |""".stripMargin
 
       case StorageFormat.Iceberg =>
@@ -92,7 +94,7 @@ class IncrementalLoader(
            |USING ICEBERG
            |${if (icebergTableProps.nonEmpty) s"TBLPROPERTIES (\n  $icebergTableProps\n)" else ""}
            |LOCATION '$targetPath'
-           |${if (nonPartitioned) "" else "PARTITIONED BY (partition)"}
+           |${if (nonPartitioned) "" else s"PARTITIONED BY ($partitionPathField)"}
            |""".stripMargin
 
       case _ =>
@@ -202,7 +204,9 @@ class IncrementalLoader(
                 maxRetries: Int = 5,
                 compactionMinFileSize: Long = 100 * 1024 * 1024,
                 compactionTargetFileSize: Long = 120 * 1024 * 1024,
-                deltaOptimizeWrite: Boolean = true): Unit = {
+                deltaOptimizeWrite: Boolean = true,
+                recordKeyField: String = RECORD_KEY_FIELD_NAME,
+                partitionPathField: String = PARTITION_PATH_FIELD_NAME): Unit = {
     require(inputPath.nonEmpty, "Input path cannot be empty")
     require(outputPath.nonEmpty, "Output path cannot be empty")
 
@@ -327,7 +331,9 @@ class IncrementalLoader(
           writeMode,
           roundNo,
           asyncCompactionEnabled,
-          compactionTargetFileSize)
+          compactionTargetFileSize,
+          recordKeyField,
+          partitionPathField)
       }
 
       // Want to reset the write distribution mode to hash after first commit for Iceberg
@@ -369,7 +375,9 @@ class IncrementalLoader(
               mergeMode,
               experimentId,
               writeMode,
-              deltaOptimizeWrite)
+              deltaOptimizeWrite,
+              recordKeyField,
+              partitionPathField)
 
             allRoundTimes += roundTiming.durationMs
 
@@ -449,7 +457,9 @@ class IncrementalLoader(
       mergeMode: MergeMode,
       experimentId: String,
       writeMode: WriteMode = WriteMode.CopyOnWrite,
-      deltaOptimizeWrite: Boolean = true): RoundTiming = {
+      deltaOptimizeWrite: Boolean = true,
+      recordKeyField: String = RECORD_KEY_FIELD_NAME,
+      partitionPathField: String = PARTITION_PATH_FIELD_NAME): RoundTiming = {
     val startTime = Instant.now()
 
     format match {
@@ -467,7 +477,9 @@ class IncrementalLoader(
           updateColumns,
           mergeMode,
           tableName,
-          writeMode)
+          writeMode,
+          recordKeyField,
+          partitionPathField)
       case Delta =>
         val tableName = s"delta-$experimentId"
         writeToDelta(
@@ -481,7 +493,8 @@ class IncrementalLoader(
           mergeMode,
           tableName,
           writeMode,
-          deltaOptimizeWrite)
+          deltaOptimizeWrite,
+          partitionPathField)
       case Parquet =>
         writeToParquet(inputDF, operation, outputPath, saveMode)
       case Iceberg =>
@@ -493,7 +506,8 @@ class IncrementalLoader(
           mergeConditionColumns,
           updateColumns,
           mergeMode,
-          tableName)
+          tableName,
+          partitionPathField)
       case _ =>
         throw new UnsupportedOperationException(s"$format is not supported")
     }
@@ -511,7 +525,8 @@ class IncrementalLoader(
       mergeConditionColumns: Seq[String],
       updateColumns: Seq[String],
       mergeMode: MergeMode,
-      tableName: String): Unit = {
+      tableName: String,
+      partitionPathField: String = PARTITION_PATH_FIELD_NAME): Unit = {
     val escapedTableName = escapeTableName(tableName)
     df.createOrReplaceTempView(s"source")
 
@@ -565,7 +580,8 @@ class IncrementalLoader(
       mergeMode: MergeMode,
       tableName: String,
       writeMode: WriteMode,
-      deltaOptimizeWrite: Boolean = true): Unit = {
+      deltaOptimizeWrite: Boolean = true,
+      partitionPathField: String = PARTITION_PATH_FIELD_NAME): Unit = {
     val targetPath = s"$outputPath/$tableName"
     operation match {
       case OperationType.Insert | OperationType.BulkInsert =>
@@ -581,7 +597,7 @@ class IncrementalLoader(
         val partitionedWriter = if (nonPartitioned) {
           optionedWriter
         } else {
-          optionedWriter.partitionBy(PARTITION_PATH_FIELD_NAME)
+          optionedWriter.partitionBy(partitionPathField)
         }
 
         partitionedWriter
@@ -652,7 +668,9 @@ class IncrementalLoader(
       updateColumns: Seq[String],
       mergeMode: MergeMode,
       tableName: String,
-      writeMode: WriteMode): Unit = {
+      writeMode: WriteMode,
+      recordKeyField: String = RECORD_KEY_FIELD_NAME,
+      partitionPathField: String = PARTITION_PATH_FIELD_NAME): Unit = {
     apiType match {
       case ApiType.SparkDatasourceApi =>
         require(
@@ -663,17 +681,17 @@ class IncrementalLoader(
           "Hudi sparkDataSourceApi does not support partial column updates.")
         require(
           mergeConditionColumns == (if (nonPartitioned) {
-            Seq(RECORD_KEY_FIELD_NAME)
+            Seq(recordKeyField)
           } else {
-            Seq(RECORD_KEY_FIELD_NAME, PARTITION_PATH_FIELD_NAME)
+            Seq(recordKeyField, partitionPathField)
           }),
           s"Hudi sparkDataSourceApi does not support custom merge conditions: $mergeConditionColumns")
 
         val recordKeyAndPartitionOpts = if (nonPartitioned) {
-          Map(DataSourceWriteOptions.RECORDKEY_FIELD.key() -> RECORD_KEY_FIELD_NAME)
+          Map(DataSourceWriteOptions.RECORDKEY_FIELD.key() -> recordKeyField)
         } else {
-          Map(DataSourceWriteOptions.PARTITIONPATH_FIELD.key() -> PARTITION_PATH_FIELD_NAME,
-            DataSourceWriteOptions.RECORDKEY_FIELD.key() -> RECORD_KEY_FIELD_NAME)
+          Map(DataSourceWriteOptions.PARTITIONPATH_FIELD.key() -> partitionPathField,
+            DataSourceWriteOptions.RECORDKEY_FIELD.key() -> recordKeyField)
         }
 
         val targetOpts = opts ++ recordKeyAndPartitionOpts ++ Map(HoodieWriteConfig.TBL_NAME.key() -> "hudi")
@@ -786,7 +804,9 @@ object IncrementalLoader {
           maxRetries = config.maxRetries,
           compactionMinFileSize = config.compactionMinFileSize,
           compactionTargetFileSize = config.compactionTargetFileSize,
-          deltaOptimizeWrite = config.deltaOptimizeWrite)
+          deltaOptimizeWrite = config.deltaOptimizeWrite,
+          recordKeyField = config.recordKeyField,
+          partitionPathField = config.partitionPathField)
         spark.stop()
       case None =>
         // scopt already prints help
