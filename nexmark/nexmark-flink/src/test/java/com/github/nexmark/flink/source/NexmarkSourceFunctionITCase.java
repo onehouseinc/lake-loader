@@ -38,6 +38,7 @@ public class NexmarkSourceFunctionITCase {
 		env.setParallelism(4);
 		NexmarkConfiguration nexmarkConfiguration = new NexmarkConfiguration();
 		nexmarkConfiguration.bidProportion = 46;
+		nexmarkConfiguration.partitionKeyField = ""; // use 4-column schema so type info matches source output
 		GeneratorConfig generatorConfig = new GeneratorConfig(
 			nexmarkConfiguration, System.currentTimeMillis(), 1, 100,  0L, 1);
 		TypeInformation<RowData> typeInformation =

@@ -19,6 +19,7 @@ package com.github.nexmark.flink.generator;
 
 import com.github.nexmark.flink.model.Event;
 import com.github.nexmark.flink.NexmarkConfiguration;
+import com.github.nexmark.flink.source.PartitionDistributionMode;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -228,6 +229,26 @@ public class GeneratorConfig implements Serializable {
 
   public double getProbDelayedEvent() {
     return configuration.probDelayedEvent;
+  }
+
+  public String getPartitionKeyField() {
+    return configuration.partitionKeyField;
+  }
+
+  public PartitionDistributionMode getPartitionDistributionMode() {
+    return configuration.partitionDistributionMode;
+  }
+
+  public String getPartitionValues() {
+    return configuration.partitionValues;
+  }
+
+  public int getPartitionNumber() {
+    return configuration.partitionNumber;
+  }
+
+  public String getPartitionDistribution() {
+    return configuration.partitionDistribution;
   }
 
   public long getOccasionalDelaySec() {

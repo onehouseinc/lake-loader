@@ -23,6 +23,7 @@ import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
 
+import com.github.nexmark.flink.generator.GeneratorConfig;
 import com.github.nexmark.flink.model.Auction;
 import com.github.nexmark.flink.model.Bid;
 import com.github.nexmark.flink.model.Event;
@@ -30,13 +31,26 @@ import com.github.nexmark.flink.model.Person;
 
 public class RowDataEventDeserializer implements EventDeserializer<RowData> {
 
+	/** Non-null when a partition key field is configured; handles all partition value computation. */
+	private final PartitionValueGenerator partitionGenerator;
+
+	public RowDataEventDeserializer() {
+		this(null);
+	}
+
+	public RowDataEventDeserializer(GeneratorConfig config) {
+		boolean hasPartitionColumn = config != null && config.getPartitionKeyField() != null && !config.getPartitionKeyField().isEmpty();
+		this.partitionGenerator = hasPartitionColumn ? new PartitionValueGenerator(config) : null;
+	}
+
 	@Override
 	public RowData deserialize(Event event) {
 		return convertEvent(event);
 	}
 
 	private RowData convertEvent(Event event) {
-		GenericRowData rowData = new GenericRowData(4);
+		int numFields = partitionGenerator != null ? 5 : 4;
+		GenericRowData rowData = new GenericRowData(numFields);
 		rowData.setField(0, event.type.value);
 		if (event.type == Event.Type.PERSON) {
 			assert event.newPerson != null;
@@ -49,6 +63,9 @@ public class RowDataEventDeserializer implements EventDeserializer<RowData> {
 			rowData.setField(3, convertBid(event.bid));
 		} else {
 			throw new UnsupportedOperationException("Unsupported event type: " + event.type.name());
+		}
+		if (partitionGenerator != null) {
+			rowData.setField(4, partitionGenerator.computePartitionValueMs(event));
 		}
 		return rowData;
 	}
@@ -92,5 +109,4 @@ public class RowDataEventDeserializer implements EventDeserializer<RowData> {
 		rowData.setField(6, StringData.fromString(bid.extra));
 		return rowData;
 	}
-
 }

@@ -8,6 +8,7 @@ SELECT
     person.state,
     `dateTime`,
     person.extra
+    -- , `timestamp`    -- include if partition.key.field is enabled in ddl_gen.sql
 FROM ${NEXMARK_TABLE} WHERE event_type = 0;
 
 CREATE VIEW auction AS
@@ -22,6 +23,7 @@ SELECT
     auction.seller,
     auction.category,
     auction.extra
+    -- , `timestamp`    -- include if partition.key.field is enabled in ddl_gen.sql
 FROM ${NEXMARK_TABLE} WHERE event_type = 1;
 
 CREATE VIEW bid AS
@@ -33,4 +35,5 @@ SELECT
     bid.url,
     `dateTime`,
     bid.extra
+    -- , `timestamp`    -- include if partition.key.field is enabled in ddl_gen.sql
 FROM ${NEXMARK_TABLE} WHERE event_type = 2;

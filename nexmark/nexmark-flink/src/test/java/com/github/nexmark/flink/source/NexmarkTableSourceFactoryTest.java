@@ -39,6 +39,7 @@ import java.util.Map;
 import static com.github.nexmark.flink.source.NexmarkTableSource.NEXMARK_SCHEMA;
 import static com.github.nexmark.flink.source.NexmarkTableSource.RESOLVED_SCHEMA;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 /**
  * Test for {@link NexmarkTableSource} created by {@link NexmarkTableSourceFactory}.
@@ -116,6 +117,26 @@ public class NexmarkTableSourceFactoryTest {
 		Map<String, String> options = new HashMap<>();
 		options.put("connector", "nexmark");
 		return options;
+	}
+
+	@Test
+	public void testGetResolvedSchemaPartitionKey() {
+		NexmarkConfiguration confWithPartition = new NexmarkConfiguration();
+		confWithPartition.partitionKeyField = "timestamp";
+		GeneratorConfig configWithPartition = new GeneratorConfig(
+			confWithPartition, System.currentTimeMillis(), 1, 100, -1L, 1);
+		ResolvedSchema schemaWithPartition = NexmarkTableSource.getResolvedSchema(configWithPartition);
+		assertEquals(5, schemaWithPartition.getColumnCount());
+		assertTrue(schemaWithPartition.getColumnNames().contains("timestamp"));
+		assertEquals("BIGINT", schemaWithPartition.getColumnDataTypes().get(4).getLogicalType().asSummaryString());
+
+		NexmarkConfiguration confNoPartition = new NexmarkConfiguration();
+		confNoPartition.partitionKeyField = "";
+		GeneratorConfig configNoPartition = new GeneratorConfig(
+			confNoPartition, System.currentTimeMillis(), 1, 100, -1L, 1);
+		ResolvedSchema schemaNoPartition = NexmarkTableSource.getResolvedSchema(configNoPartition);
+		assertEquals(RESOLVED_SCHEMA, schemaNoPartition);
+		assertEquals(4, schemaNoPartition.getColumnCount());
 	}
 
 	private static DynamicTableSource createTableSource(Map<String, String> options) {

@@ -35,6 +35,9 @@ CREATE TABLE datagen (
             ELSE bid.`dateTime`
         END,
     WATERMARK FOR `dateTime` AS `dateTime` - INTERVAL '4' SECOND
+    -- To enable a partition key column (BIGINT epoch-ms, start of day UTC), add the line below
+    -- and set 'partition.key.field' = '<column-name>' in the WITH clause:
+    -- , `timestamp` BIGINT
 ) WITH (
     'connector' = 'nexmark',
     'first-event.rate' = '${TPS}',
@@ -43,4 +46,8 @@ CREATE TABLE datagen (
     'person.proportion' = '${PERSON_PROPORTION}',
     'auction.proportion' = '${AUCTION_PROPORTION}',
     'bid.proportion' = '${BID_PROPORTION}'
+    -- Partition key options (all optional):
+    -- , 'partition.key.field' = 'timestamp'         -- enables partition column (default: disabled)
+    -- , 'partition.number' = '7'                    -- generate values: today, today-1, ..., today-6
+    -- , 'partition.distribution.mode' = 'UNIFORM'   -- UNIFORM (hash, deterministic) | LATEST | RANDOM (non-deterministic) | SKEWED | CUSTOM
 );

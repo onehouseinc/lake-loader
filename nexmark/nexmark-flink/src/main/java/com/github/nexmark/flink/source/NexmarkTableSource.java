@@ -29,6 +29,8 @@ import org.apache.flink.table.connector.source.SourceProvider;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.types.DataType;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
@@ -83,6 +85,21 @@ public class NexmarkTableSource implements ScanTableSource {
 							(DataType) ((Schema.UnresolvedPhysicalColumn) unresolvedColumn).getDataType())
 					.collect(Collectors.toList()));
 
+	/**
+	 * Returns the resolved schema for this source. When partition key field is configured,
+	 * the schema includes that column (BIGINT, epoch milliseconds) as the last column.
+	 */
+	public static ResolvedSchema getResolvedSchema(GeneratorConfig config) {
+		String partitionKeyField = config.getPartitionKeyField();
+		if (partitionKeyField == null || partitionKeyField.isEmpty()) {
+			return RESOLVED_SCHEMA;
+		}
+		List<String> names = new ArrayList<>(RESOLVED_SCHEMA.getColumnNames());
+		List<DataType> types = new ArrayList<>(RESOLVED_SCHEMA.getColumnDataTypes());
+		names.add(partitionKeyField);
+		types.add(BIGINT());
+		return ResolvedSchema.physical(names, types);
+	}
 
 	private final GeneratorConfig config;
 
@@ -97,8 +114,9 @@ public class NexmarkTableSource implements ScanTableSource {
 
 	@Override
 	public ScanRuntimeProvider getScanRuntimeProvider(ScanContext scanContext) {
+		ResolvedSchema schema = getResolvedSchema(config);
 		TypeInformation<RowData> outputType = scanContext
-			.createTypeInformation(RESOLVED_SCHEMA.toPhysicalRowDataType());
+			.createTypeInformation(schema.toPhysicalRowDataType());
 		return SourceProvider.of(new NexmarkSource(config, outputType));
 	}
 
