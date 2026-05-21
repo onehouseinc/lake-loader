@@ -136,6 +136,10 @@ object IncrementalLoaderParser {
     opt[String]("partition-path-field")
       .action((x, c) => c.copy(partitionPathField = x))
       .text("Field name to use as the partition path. Default: partition")
+
+    opt[Int]("parallelism")
+      .action((x, c) => c.copy(parallelism = x))
+      .text("If > 0, repartition the input DataFrame to this many partitions before writing. Default: -1 (no repartition)")
   }
 
   /**

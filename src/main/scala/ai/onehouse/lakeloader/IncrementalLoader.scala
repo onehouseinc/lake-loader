@@ -206,7 +206,8 @@ class IncrementalLoader(
                 compactionTargetFileSize: Long = 120 * 1024 * 1024,
                 deltaOptimizeWrite: Boolean = true,
                 recordKeyField: String = RECORD_KEY_FIELD_NAME,
-                partitionPathField: String = PARTITION_PATH_FIELD_NAME): Unit = {
+                partitionPathField: String = PARTITION_PATH_FIELD_NAME,
+                parallelism: Int = -1): Unit = {
     require(inputPath.nonEmpty, "Input path cannot be empty")
     require(outputPath.nonEmpty, "Output path cannot be empty")
 
@@ -341,11 +342,12 @@ class IncrementalLoader(
         updateIcebergTable(experimentId)
       }
 
-      val inputDF = if (nonPartitioned || roundNo != 0) {
+      val baseDF = if (nonPartitioned || roundNo != 0) {
         rawDF
       } else {
         rawDF.sort("partition", "key")
       }
+      val inputDF = if (parallelism > 0) baseDF.repartition(parallelism) else baseDF
 
         var attempt = 0
         var success = false
@@ -806,7 +808,8 @@ object IncrementalLoader {
           compactionTargetFileSize = config.compactionTargetFileSize,
           deltaOptimizeWrite = config.deltaOptimizeWrite,
           recordKeyField = config.recordKeyField,
-          partitionPathField = config.partitionPathField)
+          partitionPathField = config.partitionPathField,
+          parallelism = config.parallelism)
         spark.stop()
       case None =>
         // scopt already prints help

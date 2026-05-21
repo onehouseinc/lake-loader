@@ -194,4 +194,5 @@ case class LoadConfig(
                        compactionTargetFileSize: Long = 120 * 1024 * 1024,
                        deltaOptimizeWrite: Boolean = true,
                        recordKeyField: String = "key",
-                       partitionPathField: String = "partition")
+                       partitionPathField: String = "partition",
+                       parallelism: Int = -1)
