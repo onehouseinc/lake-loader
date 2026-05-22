@@ -344,7 +344,7 @@ class IncrementalLoader(
       val inputDF = if (nonPartitioned || roundNo != 0) {
         rawDF
       } else {
-        rawDF.sort("partition", "key")
+        rawDF.sort(partitionPathField, recordKeyField)
       }
 
         var attempt = 0

@@ -150,6 +150,30 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
         getSchema(numColumns)
     }
 
+    // When a custom Avro schema is supplied, the user-provided --record-size is just a width hint
+    // for variable-length fields (strings/binary). The actual on-disk row size depends on the schema
+    // and can be very different. Sample-write 100K rows as parquet, measure the compressed size,
+    // and use that directly as bytes/record for parallelism. Since the sample is already compressed
+    // parquet (same format as the real output), we skip COMPRESSION_RATIO_GUESS for this path.
+    val (effectiveRecordSize, effectiveCompressionRatio) = avroSchemaPath match {
+      case Some(_) =>
+        val estimated = estimateRecordSize(
+          path,
+          schema,
+          partitionPaths,
+          recordSize,
+          keyType)
+        println(
+          s"""
+             |$lineSepBold
+             |Estimated record size from custom schema: $estimated bytes/record (compressed parquet avg over 100K sample rows).
+             |Overriding --record-size=$recordSize for parallelism computation.
+             |$lineSepBold
+             |""".stripMargin)
+        (estimated, 1.0)
+      case None => (recordSize, COMPRESSION_RATIO_GUESS)
+    }
+
     ////////////////////////////////////////
     // Generating workload
     ////////////////////////////////////////
@@ -174,9 +198,14 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
           else Math.min((updateRatio * targetRecords).toLong, curRound * targetRecords)
         val numInserts = targetRecords - numUpdates
 
+        // Use ceiling so the per-file size never exceeds targetDataFileSize. With floor,
+        // 7.67 truncates to 7 and each file overshoots the cap; ceil → 8 keeps every file
+        // strictly under the configured target (default 128 MB).
+        val estimatedTotalBytes =
+          targetRecords.toDouble * effectiveRecordSize * effectiveCompressionRatio
         val targetParallelism = Math.max(
           2,
-          (targetRecords / (targetDataFileSize / (recordSize * COMPRESSION_RATIO_GUESS))).toInt)
+          Math.ceil(estimatedTotalBytes / targetDataFileSize).toInt)
 
         println(s"""
              |$lineSepBold
@@ -225,6 +254,72 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
         spark.catalog.clearCache()
       }
     })
+  }
+
+  /**
+   * Estimate the on-disk size per record for a given schema by writing 100K sample rows to a
+   * temporary parquet directory under `basePath` and measuring its size. The sample is generated
+   * with the same ComplexDataGenerator code path used by the real workload so the estimate
+   * reflects actual generator output (variable-length strings, nested types, nulls, etc.).
+   *
+   * The temp directory is always deleted before returning.
+   *
+   * @param basePath          parent path used to host the temp sample directory
+   * @param schema            target schema (custom Avro or default)
+   * @param partitionPaths    partition path values, used by the generator
+   * @param recordSizeHint    user-supplied --record-size, used as a width hint for variable fields
+   * @param keyType           key generation strategy
+   * @return average bytes/record measured from the sample
+   */
+  private def estimateRecordSize(
+      basePath: String,
+      schema: StructType,
+      partitionPaths: List[String],
+      recordSizeHint: Int,
+      keyType: KeyType): Int = {
+    val sampleCount: Long = 100000L
+    val sampleParallelism = 4
+    // Place the sample under the user's output path so the temp dir lives on the same filesystem
+    // (avoids cross-FS issues when basePath is s3://, gs://, etc.).
+    val samplePath = s"$basePath/.record_size_sample_${System.currentTimeMillis()}"
+    val samplePathHadoop = new Path(samplePath)
+    val fs = samplePathHadoop.getFileSystem(spark.sparkContext.hadoopConfiguration)
+
+    // Single-bucket CDF: every sample row lands on partitionPaths.head. All partition values are
+    // same-length date strings (YYYY-MM-DD), so the chosen partition doesn't affect record size.
+    val sampleCDF = List(1.0)
+    val samplePartitionPaths = List(partitionPaths.head)
+
+    try {
+      // Reuse generateNewRecord so the sample uses the same closure-captured `this.random` per
+      // task as the real workload — each task advances one Random across its rows, mirroring
+      // production-path entropy. Constructing `new Random(SEED)` per row instead would make every
+      // sample row identical and compress unrealistically well.
+      val sampleRDD = genParallelRDD(spark, sampleParallelism, 0, sampleCount)
+        .map(_ =>
+          generateNewRecord(
+            round = 0,
+            size = recordSizeHint,
+            partitionPaths = samplePartitionPaths,
+            partitionDistributionCDF = sampleCDF,
+            keyType = keyType,
+            schema = schema))
+
+      val sampleDF = spark.createDataFrame(sampleRDD, schema)
+      sampleDF
+        .repartition(1)
+        .write
+        .format(ChangeDataGenerator.DEFAULT_DATA_GEN_FORMAT)
+        .mode(SaveMode.Overwrite)
+        .save(samplePath)
+
+      val totalBytes = fs.getContentSummary(samplePathHadoop).getLength
+      Math.max((totalBytes / sampleCount).toInt, 1)
+    } finally {
+      if (fs.exists(samplePathHadoop)) {
+        fs.delete(samplePathHadoop, true)
+      }
+    }
   }
 
   ////////////////////////////////////////
