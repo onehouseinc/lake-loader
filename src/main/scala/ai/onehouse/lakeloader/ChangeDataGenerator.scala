@@ -198,9 +198,14 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
           else Math.min((updateRatio * targetRecords).toLong, curRound * targetRecords)
         val numInserts = targetRecords - numUpdates
 
+        // Use ceiling so the per-file size never exceeds targetDataFileSize. With floor,
+        // 7.67 truncates to 7 and each file overshoots the cap; ceil → 8 keeps every file
+        // strictly under the configured target (default 128 MB).
+        val estimatedTotalBytes =
+          targetRecords.toDouble * effectiveRecordSize * effectiveCompressionRatio
         val targetParallelism = Math.max(
           2,
-          (targetRecords / (targetDataFileSize / (effectiveRecordSize * effectiveCompressionRatio))).toInt)
+          Math.ceil(estimatedTotalBytes / targetDataFileSize).toInt)
 
         println(s"""
              |$lineSepBold
