@@ -285,8 +285,10 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     val samplePathHadoop = new Path(samplePath)
     val fs = samplePathHadoop.getFileSystem(spark.sparkContext.hadoopConfiguration)
 
-    // Uniform partition distribution for the sample — partition value doesn't materially affect size.
-    val sampleCDF = MathUtils.makeCDF(List.fill(partitionPaths.size)(1.0 / partitionPaths.size))
+    // Single-bucket CDF: every sample row lands on partitionPaths.head. All partition values are
+    // same-length date strings (YYYY-MM-DD), so the chosen partition doesn't affect record size.
+    val sampleCDF = List(1.0)
+    val samplePartitionPaths = List(partitionPaths.head)
 
     try {
       // Reuse generateNewRecord so the sample uses the same closure-captured `this.random` per
@@ -298,7 +300,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
           generateNewRecord(
             round = 0,
             size = recordSizeHint,
-            partitionPaths = partitionPaths,
+            partitionPaths = samplePartitionPaths,
             partitionDistributionCDF = sampleCDF,
             keyType = keyType,
             schema = schema))
