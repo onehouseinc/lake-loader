@@ -168,7 +168,9 @@ class PartitionDistributionMatrixTest extends AnyFunSuite {
         partitionDistributionMatrixOpt = Some(List.fill(2)(row)),
         numRounds = 2)
     }
-    assert(ex.getMessage == "assertion failed: 0.2 != 1.0")
+    assert(
+      ex.getMessage ==
+        "assertion failed: partition distribution row weights must sum to 1.0, got 0.2")
   }
 
   test("genPartitionsDistributionMatrix rejects rows that sum to more than 1.0") {
@@ -179,7 +181,9 @@ class PartitionDistributionMatrixTest extends AnyFunSuite {
         partitionDistributionMatrixOpt = Some(List.fill(2)(row)),
         numRounds = 2)
     }
-    assert(ex.getMessage == "assertion failed: 1.5 != 1.0")
+    assert(
+      ex.getMessage ==
+        "assertion failed: partition distribution row weights must sum to 1.0, got 1.5")
   }
 
   test("genPartitionsDistributionMatrix accepts rows that sum to 1.0") {

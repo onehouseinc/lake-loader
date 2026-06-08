@@ -521,7 +521,9 @@ object ChangeDataGenerator {
           assert(
             totalPartitions == -1 || totalPartitions == dist.size,
             s"$totalPartitions != ${dist.size}")
-          assert(math.abs(dist.sum - 1.0) < 1e-5, s"${dist.sum} != 1.0")
+          assert(
+            math.abs(dist.sum - 1.0) < 1e-5,
+            s"partition distribution row weights must sum to 1.0, got ${dist.sum}")
         }
         (partitionDistMatrix.head.size, partitionDistMatrix)
 
