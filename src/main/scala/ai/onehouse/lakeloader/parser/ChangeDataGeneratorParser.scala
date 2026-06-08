@@ -16,12 +16,7 @@ package ai.onehouse.lakeloader.parser
 
 import ai.onehouse.lakeloader.configs.KeyTypes.KeyType
 import ai.onehouse.lakeloader.configs.UpdatePatterns.UpdatePatterns
-import ai.onehouse.lakeloader.configs.{
-  DatagenConfig,
-  KeyTypes,
-  PartitionDistributionSpec,
-  UpdatePatterns
-}
+import ai.onehouse.lakeloader.configs.{DatagenConfig, KeyTypes, PartitionDistributionSpec, UpdatePatterns}
 import ai.onehouse.lakeloader.configs.ChangeDataGeneratorConfigs._
 import scopt.OptionParser
 
