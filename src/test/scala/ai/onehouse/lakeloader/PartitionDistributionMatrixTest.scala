@@ -118,7 +118,9 @@ class PartitionDistributionMatrixTest extends AnyFunSuite {
     val ex = intercept[IllegalArgumentException] {
       buildPartitionDistributionMatrix(Some(parse("0.5,0.5")), totalPartitions = -1, numRounds = 5)
     }
-    assert(ex.getMessage.contains("--total-partitions must be set"))
+    assert(
+      ex.getMessage ==
+        "requirement failed: --total-partitions must be set when using --partition-distribution")
   }
 
   test("segment longer than --total-partitions is rejected") {
@@ -128,14 +130,18 @@ class PartitionDistributionMatrixTest extends AnyFunSuite {
         totalPartitions = 5,
         numRounds = 3)
     }
-    assert(ex.getMessage.contains("exceeds --total-partitions=5"))
+    assert(
+      ex.getMessage ==
+        "requirement failed: --partition-distribution segment has 11 entries, exceeds --total-partitions=5")
   }
 
   test("parser rejects more than one ';' separator") {
     val ex = intercept[IllegalArgumentException] {
       parse("0.5;0.3;0.2")
     }
-    assert(ex.getMessage.contains("at most one ';' separator"))
+    assert(
+      ex.getMessage ==
+        "requirement failed: --partition-distribution accepts at most one ';' separator, got: '0.5;0.3;0.2'")
   }
 
   test("parser tolerates leading/trailing whitespace inside segments") {
@@ -162,7 +168,7 @@ class PartitionDistributionMatrixTest extends AnyFunSuite {
         partitionDistributionMatrixOpt = Some(List.fill(2)(row)),
         numRounds = 2)
     }
-    assert(ex.getMessage.contains("0.2"))
+    assert(ex.getMessage == "assertion failed: 0.2 != 1.0")
   }
 
   test("genPartitionsDistributionMatrix rejects rows that sum to more than 1.0") {
@@ -173,7 +179,7 @@ class PartitionDistributionMatrixTest extends AnyFunSuite {
         partitionDistributionMatrixOpt = Some(List.fill(2)(row)),
         numRounds = 2)
     }
-    assert(ex.getMessage.contains("1.5"))
+    assert(ex.getMessage == "assertion failed: 1.5 != 1.0")
   }
 
   test("genPartitionsDistributionMatrix accepts rows that sum to 1.0") {
