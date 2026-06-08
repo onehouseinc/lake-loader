@@ -492,25 +492,11 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
 
   private def genPartitionsDistributionMatrix(
       totalPartitions: Int,
-      partitionDistributionMatrixOpt: Option[List[List[Double]]]) = {
-    partitionDistributionMatrixOpt match {
-      case Some(partitionDistMatrix) =>
-        assert(partitionDistMatrix.size == numRounds)
-        partitionDistMatrix.foreach { dist =>
-          assert(
-            totalPartitions == -1 || totalPartitions == dist.size,
-            s"$totalPartitions != ${dist.size}")
-          assert((dist.sum - 1.0) < 1e-5, s"${dist.sum} != 1.0")
-        }
-
-        (partitionDistMatrix.head.size, partitionDistMatrix)
-
-      case None =>
-        val dist = List.fill(totalPartitions)(1.0 / totalPartitions)
-
-        (dist.size, List.fill(numRounds)(dist))
-    }
-  }
+      partitionDistributionMatrixOpt: Option[List[List[Double]]]) =
+    ChangeDataGenerator.genPartitionsDistributionMatrix(
+      totalPartitions,
+      partitionDistributionMatrixOpt,
+      numRounds)
 }
 
 object ChangeDataGenerator {
@@ -518,6 +504,31 @@ object ChangeDataGenerator {
   val PARTITION_PATH_FIELD_NAME = "partition"
   val COMPRESSION_RATIO_GUESS = .66
   val DEFAULT_DATA_GEN_FORMAT: String = "parquet"
+
+  /**
+   * Validate and expand `partitionDistributionMatrixOpt` into the matrix consumed by the
+   * generator. When the option is `None`, falls back to a uniform `1.0 / totalPartitions` row
+   * replicated for every round.
+   */
+  private[lakeloader] def genPartitionsDistributionMatrix(
+      totalPartitions: Int,
+      partitionDistributionMatrixOpt: Option[List[List[Double]]],
+      numRounds: Int): (Int, List[List[Double]]) =
+    partitionDistributionMatrixOpt match {
+      case Some(partitionDistMatrix) =>
+        assert(partitionDistMatrix.size == numRounds)
+        partitionDistMatrix.foreach { dist =>
+          assert(
+            totalPartitions == -1 || totalPartitions == dist.size,
+            s"$totalPartitions != ${dist.size}")
+          assert(math.abs(dist.sum - 1.0) < 1e-5, s"${dist.sum} != 1.0")
+        }
+        (partitionDistMatrix.head.size, partitionDistMatrix)
+
+      case None =>
+        val dist = List.fill(totalPartitions)(1.0 / totalPartitions)
+        (dist.size, List.fill(numRounds)(dist))
+    }
 
   /**
    * Expand the CLI `--partition-distribution` spec into the per-round insert-weight matrix

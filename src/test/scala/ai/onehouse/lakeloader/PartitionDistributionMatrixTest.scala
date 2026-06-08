@@ -14,7 +14,7 @@
 
 package ai.onehouse.lakeloader
 
-import ai.onehouse.lakeloader.ChangeDataGenerator.buildPartitionDistributionMatrix
+import ai.onehouse.lakeloader.ChangeDataGenerator.{buildPartitionDistributionMatrix, genPartitionsDistributionMatrix}
 import ai.onehouse.lakeloader.configs.PartitionDistributionSpec
 import ai.onehouse.lakeloader.parser.ChangeDataGeneratorParser
 import org.scalatest.funsuite.AnyFunSuite
@@ -148,5 +148,53 @@ class PartitionDistributionMatrixTest extends AnyFunSuite {
   test("single-segment spec mirrors firstRound into subsequentRounds") {
     val parsed = parse("0.5,0.5")
     assert(parsed == PartitionDistributionSpec(Some(List(0.5, 0.5)), Some(List(0.5, 0.5))))
+  }
+
+  // Regression: the row-sum assertion in genPartitionsDistributionMatrix was previously
+  // `(dist.sum - 1.0) < 1e-5`, which only catches sums above 1.0. Under-sum rows (e.g.
+  // weights `0.1,0.1` zero-padded to 5 partitions) passed silently and ~80% of inserts
+  // were dropped with no error. The check must be two-sided.
+  test("genPartitionsDistributionMatrix rejects rows that sum to less than 1.0") {
+    val row = List(0.1, 0.1, 0.0, 0.0, 0.0) // sums to 0.2
+    val ex = intercept[AssertionError] {
+      genPartitionsDistributionMatrix(
+        totalPartitions = 5,
+        partitionDistributionMatrixOpt = Some(List.fill(2)(row)),
+        numRounds = 2)
+    }
+    assert(ex.getMessage.contains("0.2"))
+  }
+
+  test("genPartitionsDistributionMatrix rejects rows that sum to more than 1.0") {
+    val row = List(0.5, 0.5, 0.5, 0.0, 0.0) // sums to 1.5
+    val ex = intercept[AssertionError] {
+      genPartitionsDistributionMatrix(
+        totalPartitions = 5,
+        partitionDistributionMatrixOpt = Some(List.fill(2)(row)),
+        numRounds = 2)
+    }
+    assert(ex.getMessage.contains("1.5"))
+  }
+
+  test("genPartitionsDistributionMatrix accepts rows that sum to 1.0") {
+    val row = List(0.4, 0.3, 0.2, 0.1, 0.0)
+    val (width, matrix) = genPartitionsDistributionMatrix(
+      totalPartitions = 5,
+      partitionDistributionMatrixOpt = Some(List.fill(3)(row)),
+      numRounds = 3)
+    assert(width == 5)
+    assert(matrix.size == 3)
+    assert(matrix.forall(_ == row))
+  }
+
+  test("genPartitionsDistributionMatrix uniform fallback when no matrix is provided") {
+    val (width, matrix) = genPartitionsDistributionMatrix(
+      totalPartitions = 4,
+      partitionDistributionMatrixOpt = None,
+      numRounds = 2)
+    assert(width == 4)
+    assertMatrixEquals(
+      Some(matrix),
+      Some(List.fill(2)(List.fill(4)(0.25))))
   }
 }
