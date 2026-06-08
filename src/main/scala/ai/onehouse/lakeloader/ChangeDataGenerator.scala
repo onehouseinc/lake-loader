@@ -15,7 +15,7 @@
 package ai.onehouse.lakeloader
 
 import ai.onehouse.lakeloader.ChangeDataGenerator.{genParallelRDD, COMPRESSION_RATIO_GUESS, PARTITION_PATH_FIELD_NAME, RECORD_KEY_FIELD_NAME}
-import ai.onehouse.lakeloader.configs.{DatagenConfig, KeyTypes, UpdatePatterns}
+import ai.onehouse.lakeloader.configs.{DatagenConfig, KeyTypes, PartitionDistributionSpec, UpdatePatterns}
 import ai.onehouse.lakeloader.configs.KeyTypes.KeyType
 import ai.onehouse.lakeloader.configs.UpdatePatterns.{Uniform, UpdatePatterns, Zipf}
 import ai.onehouse.lakeloader.parser.ChangeDataGeneratorParser
@@ -519,6 +519,40 @@ object ChangeDataGenerator {
   val COMPRESSION_RATIO_GUESS = .66
   val DEFAULT_DATA_GEN_FORMAT: String = "parquet"
 
+  /**
+   * Expand the CLI `--partition-distribution` spec into the per-round insert-weight matrix
+   * consumed by [[ChangeDataGenerator.generateWorkload]].
+   *
+   * Each segment is the leading non-zero weights for that batch; the rest is zero-padded up to
+   * `totalPartitions`. A `None` segment means "uniform across totalPartitions" for that batch.
+   * Round 0 uses `spec.firstRound`; rounds 1..numRounds-1 use `spec.subsequentRounds`.
+   *
+   * Returns `None` when the user did not pass the flag — caller falls through to the existing
+   * uniform-matrix default in `genPartitionsDistributionMatrix`.
+   */
+  private[lakeloader] def buildPartitionDistributionMatrix(
+      specOpt: Option[PartitionDistributionSpec],
+      totalPartitions: Int,
+      numRounds: Int): Option[List[List[Double]]] = {
+    specOpt.map { spec =>
+      require(
+        totalPartitions > 0,
+        "--total-partitions must be set when using --partition-distribution")
+      def buildRow(leading: Option[List[Double]]): List[Double] = leading match {
+        case None => List.fill(totalPartitions)(1.0 / totalPartitions)
+        case Some(weights) =>
+          require(
+            weights.size <= totalPartitions,
+            s"--partition-distribution segment has ${weights.size} entries, exceeds --total-partitions=$totalPartitions")
+          weights ++ List.fill(totalPartitions - weights.size)(0.0)
+      }
+      val firstRow = buildRow(spec.firstRound)
+      val subsequentRow = buildRow(spec.subsequentRounds)
+      if (numRounds <= 1) List.fill(numRounds)(firstRow)
+      else firstRow :: List.fill(numRounds - 1)(subsequentRow)
+    }
+  }
+
   def main(args: Array[String]): Unit = {
 
     ChangeDataGeneratorParser.parser.parse(args, DatagenConfig()) match {
@@ -527,25 +561,10 @@ object ChangeDataGenerator {
           .appName("ChangeDataGeneratorApp")
           .config("spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2")
           .getOrCreate()
-        val partitionDistributionMatrixOpt: Option[List[List[Double]]] =
-          config.partitionDistribution.map { spec =>
-            require(
-              config.totalPartitions > 0,
-              "--total-partitions must be set when using --partition-distribution")
-            def buildRow(leading: Option[List[Double]]): List[Double] = leading match {
-              case None =>
-                List.fill(config.totalPartitions)(1.0 / config.totalPartitions)
-              case Some(weights) =>
-                require(
-                  weights.size <= config.totalPartitions,
-                  s"--partition-distribution segment has ${weights.size} entries, exceeds --total-partitions=${config.totalPartitions}")
-                weights ++ List.fill(config.totalPartitions - weights.size)(0.0)
-            }
-            val firstRow = buildRow(spec.firstRound)
-            val subsequentRow = buildRow(spec.subsequentRounds)
-            if (config.numberOfRounds <= 1) List.fill(config.numberOfRounds)(firstRow)
-            else firstRow :: List.fill(config.numberOfRounds - 1)(subsequentRow)
-          }
+        val partitionDistributionMatrixOpt = buildPartitionDistributionMatrix(
+          config.partitionDistribution,
+          config.totalPartitions,
+          config.numberOfRounds)
 
         val changeDataGenerator = new ChangeDataGenerator(spark, config.numberOfRounds)
         changeDataGenerator.generateWorkload(

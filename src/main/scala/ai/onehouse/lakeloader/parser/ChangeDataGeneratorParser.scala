@@ -101,7 +101,7 @@ object ChangeDataGeneratorParser {
           "';0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1' makes round 0 uniform and rounds 1+ skewed.")
     }
 
-  private[parser] def parsePartitionDistribution(raw: String): PartitionDistributionSpec = {
+  private[lakeloader] def parsePartitionDistribution(raw: String): PartitionDistributionSpec = {
     val parts = raw.split(";", -1)
     require(
       parts.length <= 2,
