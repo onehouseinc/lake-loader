@@ -16,7 +16,7 @@ package ai.onehouse.lakeloader.parser
 
 import ai.onehouse.lakeloader.configs.KeyTypes.KeyType
 import ai.onehouse.lakeloader.configs.UpdatePatterns.UpdatePatterns
-import ai.onehouse.lakeloader.configs.{DatagenConfig, KeyTypes, UpdatePatterns}
+import ai.onehouse.lakeloader.configs.{DatagenConfig, KeyTypes, PartitionDistributionSpec, UpdatePatterns}
 import ai.onehouse.lakeloader.configs.ChangeDataGeneratorConfigs._
 import scopt.OptionParser
 
@@ -89,5 +89,30 @@ object ChangeDataGeneratorParser {
         .action((x, c) => c.copy(avroSchemaPath = Some(x)))
         .text("Path to an Avro schema file (.avsc). When provided, data is generated matching this schema " +
           "instead of the default flat schema. The --number-columns parameter is ignored.")
+
+      opt[String]("partition-distribution")
+        .action((x, c) => c.copy(partitionDistribution = Some(parsePartitionDistribution(x))))
+        .text("Per-partition insert weights, given as the leading non-zero entries; the rest are " +
+          "zero-padded up to --total-partitions and each segment must sum to 1.0. " +
+          "Use ';' to give round 0 a different distribution from subsequent rounds: " +
+          "'<first-round>;<subsequent-rounds>'. An empty segment means uniform across all " +
+          "partitions for that batch. Examples (with --total-partitions 365): " +
+          "'0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1' applies the same skew to every round; " +
+          "';0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1' makes round 0 uniform and rounds 1+ skewed.")
     }
+
+  private[lakeloader] def parsePartitionDistribution(raw: String): PartitionDistributionSpec = {
+    val parts = raw.split(";", -1)
+    require(
+      parts.length <= 2,
+      s"--partition-distribution accepts at most one ';' separator, got: '$raw'")
+    def parseSegment(s: String): Option[List[Double]] = {
+      val trimmed = s.trim
+      if (trimmed.isEmpty) None
+      else Some(trimmed.split(",").map(_.trim.toDouble).toList)
+    }
+    val first = parseSegment(parts(0))
+    val subsequent = if (parts.length == 2) parseSegment(parts(1)) else first
+    PartitionDistributionSpec(first, subsequent)
+  }
 }

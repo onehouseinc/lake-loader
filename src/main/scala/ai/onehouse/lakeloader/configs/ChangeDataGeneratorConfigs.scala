@@ -32,7 +32,20 @@ case class DatagenConfig(
     updatePattern: UpdatePatterns = UpdatePatterns.Uniform,
     numPartitionsToUpdate: Int = -1,
     zipfianShape: Double = 2.93,
-    avroSchemaPath: Option[String] = None)
+    avroSchemaPath: Option[String] = None,
+    partitionDistribution: Option[PartitionDistributionSpec] = None)
+
+/**
+ * Per-round split for the CLI partition distribution flag.
+ *
+ * `firstRound` weights apply to round 0; `subsequentRounds` weights apply to rounds 1..N-1.
+ * `None` for a segment means "uniform across totalPartitions" for that batch.
+ * Each segment carries only the leading non-zero weights and is zero-padded to totalPartitions
+ * when the matrix is built.
+ */
+case class PartitionDistributionSpec(
+    firstRound: Option[List[Double]],
+    subsequentRounds: Option[List[Double]])
 
 object KeyTypes extends Enumeration {
   type KeyType = Value
