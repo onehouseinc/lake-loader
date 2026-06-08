@@ -86,6 +86,7 @@ spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator <jar-file> [opti
 | updatePatterns        | `--update-pattern`                     | UpdatePatterns | Uniform    | Update distribution: `Uniform`, `Zipf`                          |
 | numPartitionsToUpdate | `--num-partitions-to-update`           | Int            | -1         | Number of partitions to update (-1 for all)                     |
 | zipfianShape          | `--zipfian-shape`                      | Double         | 2.93       | Shape parameter for Zipf distribution (higher = more skewed)    |
+| partitionDistribution | `--partition-distribution`             | String         | uniform    | Leading per-partition insert weights, zero-padded up to `--total-partitions`. Each segment must sum to 1.0. Use `;` to give round 0 a different distribution than rounds 1+ (e.g. `;0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1` → round 0 uniform, rounds 1+ concentrated in first 10 partitions). An empty segment = uniform across all partitions for that batch. |
 
 **Notes**:
 * **Record count specification**: `--number-records-per-round` accepts a comma-separated list of record counts (e.g., `22000000,22000` for a large initial load followed by smaller incremental rounds). A single value applies uniformly to all rounds. If fewer values are provided than the number of rounds, the last value is repeated for remaining rounds.

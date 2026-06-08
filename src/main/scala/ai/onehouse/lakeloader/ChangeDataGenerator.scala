@@ -527,6 +527,26 @@ object ChangeDataGenerator {
           .appName("ChangeDataGeneratorApp")
           .config("spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2")
           .getOrCreate()
+        val partitionDistributionMatrixOpt: Option[List[List[Double]]] =
+          config.partitionDistribution.map { spec =>
+            require(
+              config.totalPartitions > 0,
+              "--total-partitions must be set when using --partition-distribution")
+            def buildRow(leading: Option[List[Double]]): List[Double] = leading match {
+              case None =>
+                List.fill(config.totalPartitions)(1.0 / config.totalPartitions)
+              case Some(weights) =>
+                require(
+                  weights.size <= config.totalPartitions,
+                  s"--partition-distribution segment has ${weights.size} entries, exceeds --total-partitions=${config.totalPartitions}")
+                weights ++ List.fill(config.totalPartitions - weights.size)(0.0)
+            }
+            val firstRow = buildRow(spec.firstRound)
+            val subsequentRow = buildRow(spec.subsequentRounds)
+            if (config.numberOfRounds <= 1) List.fill(config.numberOfRounds)(firstRow)
+            else firstRow :: List.fill(config.numberOfRounds - 1)(subsequentRow)
+          }
+
         val changeDataGenerator = new ChangeDataGenerator(spark, config.numberOfRounds)
         changeDataGenerator.generateWorkload(
           config.outputPath,
@@ -539,7 +559,7 @@ object ChangeDataGenerator {
           recordSize = config.recordSize,
           updateRatio = config.updateRatio,
           totalPartitions = config.totalPartitions,
-          partitionDistributionMatrixOpt = None,
+          partitionDistributionMatrixOpt = partitionDistributionMatrixOpt,
           targetDataFileSize = config.targetDataFileSize,
           skipIfExists = config.skipIfExists,
           keyType = config.keyType,
