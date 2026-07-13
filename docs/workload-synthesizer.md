@@ -57,29 +57,67 @@ The point is not that these values are exotic — most of them are things a care
 ## Handoff flow
 
 ```
-   ┌──────────────────────────┐        ┌──────────────────────────┐
-   │  Customer environment    │        │  Onehouse benchmark env  │
-   │  (production data plane) │        │  (EMR / EKS, isolated)   │
-   ├──────────────────────────┤        ├──────────────────────────┤
-   │                          │        │                          │
-   │  Hudi table              │        │  spark-submit            │
-   │  (large, sensitive)      │        │    --class               │
-   │        │                 │        │      ChangeDataGenerator │
-   │        ▼                 │        │    lake-loader.jar       │
-   │  spark-submit            │        │    @synth-full.flags     │
-   │    --class               │        │        │                 │
-   │      WorkloadSynthesizer │        │        ▼                 │
-   │    lake-loader.jar       │        │  Synthetic workload      │
-   │        │                 │        │  matching production     │
-   │        ▼                 │        │  shape                   │
-   │  synth-full.flags        │        │        │                 │
-   │  synth-summary.flags     │        │        ▼                 │
-   │  synth-audit.txt         │──────▶ │  Ingestion benchmark     │
-   │  (+ customer.avsc)       │  send  │  (Hudi / Iceberg / Delta)│
-   └──────────────────────────┘        └──────────────────────────┘
+   ┌──────────────────────────┐        ┌──────────────────────────────────────┐
+   │  Customer environment    │        │  Onehouse benchmark env              │
+   │  (production data plane) │        │  (EMR / EKS, isolated)               │
+   ├──────────────────────────┤        ├──────────────────────────────────────┤
+   │                          │        │                                      │
+   │  Hudi table              │        │  spark-submit                        │
+   │  (large, sensitive)      │        │    --class WorkloadResizer           │
+   │        │                 │        │    ... --scale-factor 0.01           │
+   │        ▼                 │        │           --target-partitions 300    │
+   │  spark-submit            │        │        │                             │
+   │    --class               │        │        ▼                             │
+   │      WorkloadSynthesizer │        │  resized-full.flags                  │
+   │    lake-loader.jar       │        │        │                             │
+   │        │                 │        │        ▼                             │
+   │        ▼                 │        │  spark-submit                        │
+   │  synth-full.flags        │        │    --class ChangeDataGenerator       │
+   │  synth-summary.flags     │        │    @resized-full.flags               │
+   │  synth-audit.txt         │──────▶ │        │                             │
+   │  synth-derived.json      │  send  │        ▼                             │
+   │  schema.avsc (anon.)     │        │  Synthetic workload matching         │
+   └──────────────────────────┘        │  benchmark-sized production shape    │
+                                        │        │                             │
+                                        │        ▼                             │
+                                        │  Ingestion benchmark                 │
+                                        │  (Hudi / Iceberg / Delta)            │
+                                        └──────────────────────────────────────┘
 ```
 
-The three text files plus the Avro schema are the entire artifact set. They are small (kilobytes), reviewable, and contain no row-level data.
+The four text files plus the (optionally anonymized) Avro schema are the entire artifact set. They are small (kilobytes), reviewable, and contain no row-level data.
+
+## Two-stage pipeline: Synthesizer + Resizer
+
+Real customer tables are often too big to benchmark at 1:1 scale — a 1 PB / 3000-partition table can't be exercised in a reasonable-sized EMR/EKS test environment. So the pipeline is split in two:
+
+1. **WorkloadSynthesizer** (customer side): observes a real Hudi table, captures its shape as a set of derived parameters, and emits both a human-readable flag file (`synth-full.flags`) and a machine-readable ground truth (`synth-derived.json`).
+2. **WorkloadResizer** (benchmarking side): consumes `synth-derived.json`, applies a scale factor and/or a target partition count, and emits a scaled configuration (`resized-full.flags`) suitable for the target benchmark environment.
+
+The split matters because scaling is inherently *destination-driven*: the customer knows their production shape but doesn't know what our benchmark cluster can handle. Letting each side own its half keeps concerns clean and lets us iterate on benchmark sizing without re-running the (Spark-based) synthesizer against the customer table.
+
+**What the Resizer scales, and what it preserves.** Two independent knobs:
+- `--scale-factor F` multiplies each per-round record count by F. `numRounds` is unchanged, so the workload's temporal cadence (bursty commits stay bursty, quiet commits stay quiet) is preserved.
+- `--target-partitions M` overrides `totalPartitions`. When M < source, the partition-distribution vector is truncated and re-normalized. When M > source, the fitted zipf shape is *extrapolated* to a length-M weight vector via `p(rank) ∝ 1/rank^s`. `numPartitionsToUpdate` is rescaled to preserve the same *fraction* of updated partitions as the source (e.g. 21/3000 → ceil(0.7% × 300) = 3).
+
+**Invariants under resizing** — never touched: `updateRatio`, `updatePattern`, `zipfianShape`, `primary-key-type`, `recordSize`, `targetDataFileSize`, `schemaChoice`. These are per-record or per-workload-character properties; scaling data volume shouldn't change them.
+
+Example workflow:
+
+```bash
+# On benchmarking side, downscale a 3000-partition 1 PB table to 300 partitions × 1% volume
+spark-submit --class ai.onehouse.lakeloader.WorkloadResizer lake-loader-0.2.jar \
+  --input-json  /path/to/synth-derived.json \
+  --output-dir  /path/to/resized-configs \
+  --scale-factor    0.01 \
+  --target-partitions 300
+
+# Then run the benchmark
+spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator lake-loader-0.2.jar \
+  @/path/to/resized-configs/resized-full.flags
+```
+
+The Resizer also emits a `resized-audit.txt` with before/after values for every changed parameter and an explicit list of the preserved invariants, so reviewers can verify the scaling was applied as intended.
 
 ## Command-line surface
 

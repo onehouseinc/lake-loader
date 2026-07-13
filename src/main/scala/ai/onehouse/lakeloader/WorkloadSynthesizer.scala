@@ -607,6 +607,47 @@ object WorkloadSynthesizer {
     writeText(fs, new Path(dir, "synth-full.flags"), renderFullFlags(d))
     writeText(fs, new Path(dir, "synth-summary.flags"), renderSummaryFlags(d))
     writeText(fs, new Path(dir, "synth-audit.txt"), renderAudit(d, sourceTablePath))
+    writeText(fs, new Path(dir, "synth-derived.json"), renderDerivedJson(d, sourceTablePath))
+  }
+
+  /**
+   * Machine-readable output consumed by WorkloadResizer. Hand-rolled JSON to
+   * avoid pulling in a Jackson-flavored dependency that conflicts with the
+   * Spark 3.5.3 jackson-databind pin.
+   */
+  private[lakeloader] def renderDerivedJson(d: DerivedConfig, sourceTablePath: String): String = {
+    def escape(s: String): String = s.replace("\\", "\\\\").replace("\"", "\\\"")
+    def q(s: String): String = "\"" + escape(s) + "\""
+    def jsonList[T](xs: Seq[T], f: T => String): String = xs.map(f).mkString("[", ",", "]")
+    val schemaJson = d.schemaChoice match {
+      case SuppliedSchema(path) => s"""{"kind":"SuppliedSchema","path":${q(path)}}"""
+      case InferredColumnCount(n) => s"""{"kind":"InferredColumnCount","numColumns":$n}"""
+    }
+    val round0Json = d.round0PartitionDistribution match {
+      case Some(w) => jsonList(w, (x: Double) => x.toString)
+      case None => "null"
+    }
+    val sb = new StringBuilder
+    sb.append("{\n")
+    sb.append(s"""  "sourceTablePath": ${q(sourceTablePath)},""").append("\n")
+    sb.append(s"""  "numRounds": ${d.numRounds},""").append("\n")
+    sb.append(s"""  "recordsPerRound": ${jsonList(d.recordsPerRound, (x: Long) => x.toString)},""").append("\n")
+    sb.append(s"""  "medianRecordsPerRound": ${d.medianRecordsPerRound},""").append("\n")
+    sb.append(s"""  "totalPartitions": ${d.totalPartitions},""").append("\n")
+    sb.append(s"""  "updateRatio": ${d.updateRatio},""").append("\n")
+    sb.append(s"""  "numPartitionsToUpdate": ${d.numPartitionsToUpdate},""").append("\n")
+    sb.append(s"""  "recordSize": ${d.recordSize},""").append("\n")
+    sb.append(s"""  "targetDataFileSize": ${d.targetDataFileSize},""").append("\n")
+    sb.append(s"""  "updatePattern": ${q(d.updatePattern.toString)},""").append("\n")
+    sb.append(s"""  "zipfShape": ${d.zipfShape},""").append("\n")
+    sb.append(s"""  "partitionDistribution": ${jsonList(d.partitionDistribution, (x: Double) => x.toString)},""").append("\n")
+    sb.append(s"""  "round0PartitionDistribution": $round0Json,""").append("\n")
+    sb.append(s"""  "keyType": ${q(d.keyType.toString)},""").append("\n")
+    sb.append(s"""  "keyTypeSource": ${q(d.keyTypeSource)},""").append("\n")
+    sb.append(s"""  "recordKeyField": ${d.recordKeyField.map(q).getOrElse("null")},""").append("\n")
+    sb.append(s"""  "schemaChoice": $schemaJson""").append("\n")
+    sb.append("}\n")
+    sb.toString
   }
 
   private def writeText(fs: org.apache.hadoop.fs.FileSystem, path: Path, content: String): Unit = {

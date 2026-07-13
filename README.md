@@ -2,13 +2,15 @@
 
 Lake loader is a tool to benchmark incremental load (writes) to data lakes and warehouses. The tool generates input datasets with configurations to cover different aspects of load patterns - number of records, number of partitions, record size, update to insert ratio, distribution of inserts & updates across partitions and total number of rounds of incremental loads to perform. 
 
-The tool consists of three main components:
+The tool consists of four main components:
 
 **Change data generator** This component takes a specified L pattern and generates rounds of inputs. Each input round has change records, which can be either an insert or an update to an insert in a prior input round.
 
 **Incremental Loader** The loader component implements best practices for loading data into various open table formats using popular cloud data platforms like AWS EMR, Databricks and Snowflake. Round 0 is specially designed to perform a one-time bulk load using the preferred bulk loading methods for the data platform. Round 1 and above simply perform incremental loads using pre-generated input change records from each round.
 
 **Workload Synthesizer** Points at an existing Hudi table, walks its timeline, and emits a `ChangeDataGenerator` configuration that mimics the observed production workload shape (records per round, update ratio, per-partition insert skew, zipf shape, primary-key type). Lets customers hand off a small config artifact instead of raw data. See [docs/workload-synthesizer.md](docs/workload-synthesizer.md) for motivation and design.
+
+**Workload Resizer** Consumes the machine-readable output of the Synthesizer (`synth-derived.json`) and applies a scale factor and/or a target partition count to produce a benchmark-sized configuration. Preserves the shape of the workload (update ratio, zipf skew, key type, record size) while scaling data volume and partition fanout independently. Runs as a plain JVM CLI — no Spark needed.
 
 ![Figure: Shows the Lake Loader tool's high-level functioning to benchmark incremental loads across popular cloud data platforms.
 ](src/main/resources/images/lakeLoaderArch.png)
@@ -124,6 +126,35 @@ spark-submit --class ai.onehouse.lakeloader.WorkloadSynthesizer <jar-file> [opti
 * `schema.avsc` — only when `--anonymize-schema true` (or when `--schema-file` is set and anonymization is on). The emitted flag files reference this path via `--avro-schema`.
 
 The customer only needs to fill in `--path` (benchmark output location) in the emitted flag file before feeding it back into `ChangeDataGenerator`. Schema is either shipped alongside (as `schema.avsc`) or implied via `--number-columns`.
+
+## WorkloadResizer Parameters
+
+The WorkloadResizer consumes `synth-derived.json` (emitted by WorkloadSynthesizer) and applies a scale factor and/or a target partition count to produce a benchmark-sized configuration. Preserves `updateRatio`, `updatePattern`, `zipfianShape`, key type, record size, and file size; scales record volume and partition count independently.
+
+**CLI:**
+```bash
+spark-submit --class ai.onehouse.lakeloader.WorkloadResizer <jar-file> [options]
+```
+
+Or plain JVM (no Spark needed — the Resizer runs on JSON, not Hudi data):
+
+```bash
+java -cp <jar-file> ai.onehouse.lakeloader.WorkloadResizer [options]
+```
+
+### Parameter Reference
+
+| Parameter          | CLI Flag                    | Type    | Default          | Description                                                                                                                                              |
+|--------------------|-----------------------------|---------|------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| inputJson          | `-i`, `--input-json`        | String  | *required*       | Path to a `synth-derived.json` emitted by WorkloadSynthesizer                                                                                            |
+| outputDir          | `-o`, `--output-dir`        | String  | *required*       | Directory for `resized-full.flags`, `resized-summary.flags`, `resized-audit.txt`                                                                         |
+| scaleFactor        | `--scale-factor`            | Double  | 1.0              | Multiplier on per-round record counts. e.g. `0.01` → one-hundredth the volume. `numRounds` unchanged                                                     |
+| targetPartitions   | `--target-partitions`       | Int     | preserved        | New total partition count. Truncates + re-normalizes if smaller than source; extrapolates fitted zipf shape if larger. Rescales `numPartitionsToUpdate` |
+
+**Outputs**:
+* `resized-full.flags` — scaled flag string with per-commit record counts scaled by `--scale-factor`.
+* `resized-summary.flags` — scaled flag string with single median records-per-round.
+* `resized-audit.txt` — before/after values for every changed parameter and a list of preserved invariants.
 
 ## IncrementalLoader Parameters
 
