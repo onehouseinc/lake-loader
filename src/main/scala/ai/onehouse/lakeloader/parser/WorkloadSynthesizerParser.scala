@@ -1,0 +1,61 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package ai.onehouse.lakeloader.parser
+
+import ai.onehouse.lakeloader.configs.ChangeDataGeneratorConfigs._
+import ai.onehouse.lakeloader.configs.SynthesizerConfig
+import scopt.OptionParser
+
+object WorkloadSynthesizerParser {
+
+  val parser: OptionParser[SynthesizerConfig] =
+    new scopt.OptionParser[SynthesizerConfig]("lake-loader | workload synthesizer") {
+      head("Workload synthesizer usage")
+
+      opt[String]('t', "table-path")
+        .required()
+        .action((x, c) => c.copy(tablePath = x))
+        .text("Path to an existing Hudi table to characterize")
+
+      opt[String]('o', "output-dir")
+        .required()
+        .action((x, c) => c.copy(outputDir = x))
+        .text("Directory where synth-full.flags, synth-summary.flags, and synth-audit.txt will be written")
+
+      opt[Int]("max-commits")
+        .action((x, c) => c.copy(maxCommits = Some(x)))
+        .text("Cap on the number of most-recent completed commits to consider. Default: all completed commits")
+
+      opt[String]("since-instant")
+        .action((x, c) => c.copy(sinceInstant = Some(x)))
+        .text("Only consider commits with instant time >= this value (Hudi instant string, e.g. 20250101120000)")
+
+      opt[Boolean]("include-archived")
+        .action((x, c) => c.copy(includeArchived = x))
+        .text("Also walk the archived timeline. Slower; default: false")
+
+      opt[Double]("min-zipf-shape")
+        .action((x, c) => c.copy(minZipfShapeToEmit = x))
+        .text("Minimum fitted zipf shape below which we emit Uniform instead of Zipf. Default: 0.3")
+
+      opt[Int]("key-sample-size")
+        .action((x, c) => c.copy(keySampleSize = x))
+        .text("Number of record-key values to sample from a base parquet file when inferring primary-key type. Default: 500")
+
+      opt[String]("primary-key-type")
+        .action((x, c) => c.copy(primaryKeyTypeOverride = Some(keyTypeRead.reads(x))))
+        .text("Skip primary-key inference and use this value instead (Random | TemporallyOrdered)")
+    }
+}
