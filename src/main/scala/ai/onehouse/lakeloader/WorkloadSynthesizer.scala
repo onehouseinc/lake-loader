@@ -17,7 +17,7 @@ package ai.onehouse.lakeloader
 import ai.onehouse.lakeloader.configs.KeyTypes.KeyType
 import ai.onehouse.lakeloader.configs.{KeyTypes, SynthesizerConfig, UpdatePatterns}
 import ai.onehouse.lakeloader.parser.WorkloadSynthesizerParser
-import ai.onehouse.lakeloader.utils.TimelineStats
+import ai.onehouse.lakeloader.utils.{AvroSchemaUtils, TimelineStats}
 import org.apache.hadoop.fs.{FSDataOutputStream, Path}
 import org.apache.hudi.common.model.{HoodieCommitMetadata, HoodieWriteStat}
 import org.apache.hudi.common.table.HoodieTableMetaClient
@@ -56,6 +56,18 @@ object WorkloadSynthesizer {
       partitionUpdates: Map[String, Long],
       freshFileSizes: Seq[Long])
 
+  /**
+   * How the emitted flag file should describe the schema shape.
+   *
+   *  - `SuppliedSchema(path)`: customer handed off an .avsc; emit --avro-schema
+   *    and drop --number-columns.
+   *  - `InferredColumnCount(n)`: no schema; emit --number-columns matching the
+   *    source Hudi table's top-level field arity and drop --avro-schema.
+   */
+  sealed trait SchemaChoice
+  final case class SuppliedSchema(path: String) extends SchemaChoice
+  final case class InferredColumnCount(numColumns: Int) extends SchemaChoice
+
   /** Everything the two flag emitters need, in one bundle. */
   private[lakeloader] case class DerivedConfig(
       numRounds: Int,
@@ -73,6 +85,7 @@ object WorkloadSynthesizer {
       keyType: KeyType,
       keyTypeSource: String,
       recordKeyField: Option[String],
+      schemaChoice: SchemaChoice,
       auditNotes: Seq[String])
 
   def main(args: Array[String]): Unit = {
@@ -108,7 +121,10 @@ object WorkloadSynthesizer {
     val (keyType, keyTypeSource, recordKeyField, keyTypeNotes) =
       resolveKeyType(spark, metaClient, config)
 
-    val derived = deriveConfig(commits, config, keyType, keyTypeSource, recordKeyField, keyTypeNotes)
+    val (schemaChoice, schemaNotes) = resolveSchemaChoice(metaClient, config)
+
+    val derived = deriveConfig(
+      commits, config, keyType, keyTypeSource, recordKeyField, schemaChoice, keyTypeNotes ++ schemaNotes)
 
     writeOutputs(hadoopConf, config.outputDir, derived, config.tablePath)
     println(s"[WorkloadSynthesizer] Wrote synth-full.flags, synth-summary.flags, and synth-audit.txt to ${config.outputDir}")
@@ -219,7 +235,8 @@ object WorkloadSynthesizer {
       keyType: KeyType,
       keyTypeSource: String,
       recordKeyField: Option[String],
-      keyTypeNotes: Seq[String]): DerivedConfig = {
+      schemaChoice: SchemaChoice,
+      auditNotesPrefix: Seq[String] = Nil): DerivedConfig = {
 
     val recordsPerRound = commits.map(c => c.inserts + c.updates)
     val numRounds = commits.size
@@ -284,7 +301,7 @@ object WorkloadSynthesizer {
         else None
       } else None
 
-    val auditNotes = keyTypeNotes ++ Seq(
+    val auditNotes = auditNotesPrefix ++ Seq(
       s"commits considered: ${commits.size}",
       s"total records (inserts + updates): $totalRecords",
       s"total compressed bytes written: $totalBytes",
@@ -309,6 +326,7 @@ object WorkloadSynthesizer {
       keyType = keyType,
       keyTypeSource = keyTypeSource,
       recordKeyField = recordKeyField,
+      schemaChoice = schemaChoice,
       auditNotes = auditNotes)
   }
 
@@ -325,6 +343,140 @@ object WorkloadSynthesizer {
   private def roundTo(x: Double, decimals: Int): Double = {
     val f = math.pow(10, decimals)
     math.round(x * f) / f
+  }
+
+  ///////////////////////
+  // Schema resolution
+  ///////////////////////
+
+  /**
+   * Decide whether the emitted flag file should reference an .avsc (supplied
+   * or written from the source table) or fall back to --number-columns. When
+   * we need to write an .avsc (either anonymized, or copied from the customer
+   * for reference), the file is dropped into outputDir alongside the flag
+   * files as `schema.avsc`.
+   */
+  private[lakeloader] def resolveSchemaChoice(
+      metaClient: HoodieTableMetaClient,
+      config: SynthesizerConfig): (SchemaChoice, Seq[String]) = {
+    val notes = scala.collection.mutable.ArrayBuffer[String]()
+    val hadoopConf = metaClient.getStorageConf.unwrapAs(classOf[org.apache.hadoop.conf.Configuration])
+    val outSchemaPath = new Path(config.outputDir, "schema.avsc")
+
+    (config.schemaFile, config.anonymizeSchema) match {
+      case (Some(path), false) =>
+        notes += s"schema supplied by user: $path (no anonymization)"
+        (SuppliedSchema(path), notes.toSeq)
+
+      case (Some(path), true) =>
+        val original = AvroSchemaUtils.parseAvroSchemaFile(path, hadoopConf)
+        val anonymized = anonymizeAvroSchema(original)
+        writeAvroSchema(hadoopConf, outSchemaPath, anonymized)
+        notes += s"schema supplied by user: $path (anonymized to ${outSchemaPath.toString})"
+        (SuppliedSchema(outSchemaPath.toString), notes.toSeq)
+
+      case (None, true) =>
+        val original = readSourceTableAvroSchema(metaClient)
+        original match {
+          case Some(schema) =>
+            val anonymized = anonymizeAvroSchema(schema)
+            writeAvroSchema(hadoopConf, outSchemaPath, anonymized)
+            notes += s"schema inferred from source table, anonymized to ${outSchemaPath.toString}"
+            (SuppliedSchema(outSchemaPath.toString), notes.toSeq)
+          case None =>
+            notes += "no source table schema available; falling back to --number-columns"
+            val n = countSourceTableColumns(metaClient).getOrElse(10)
+            (InferredColumnCount(n), notes.toSeq)
+        }
+
+      case (None, false) =>
+        val n = countSourceTableColumns(metaClient).getOrElse(10)
+        notes += s"no schema supplied; emitting --number-columns=$n (top-level field count from source Hudi table)"
+        (InferredColumnCount(n), notes.toSeq)
+    }
+  }
+
+  private def readSourceTableAvroSchema(metaClient: HoodieTableMetaClient): Option[org.apache.avro.Schema] = {
+    val opt = metaClient.getTableConfig.getTableCreateSchema
+    if (opt.isPresent) Some(opt.get()) else None
+  }
+
+  private def countSourceTableColumns(metaClient: HoodieTableMetaClient): Option[Int] = {
+    readSourceTableAvroSchema(metaClient).map(_.getFields.size())
+  }
+
+  /**
+   * Rewrite the top-level RECORD's field names to typed placeholders like
+   * col_int_a, col_long_b, col_string_c. Preserves data types, nullability,
+   * and default values. Only top-level names are rewritten — nested record
+   * field names are also anonymized recursively; enums, arrays, maps
+   * likewise carry their inner types through unchanged.
+   */
+  private[lakeloader] def anonymizeAvroSchema(schema: org.apache.avro.Schema): org.apache.avro.Schema = {
+    import org.apache.avro.Schema
+    def suffix(idx: Int): String = {
+      // 0→a, 1→b, 25→z, 26→aa, 27→ab, ...
+      val sb = new StringBuilder
+      var n = idx
+      do {
+        sb.append(('a' + (n % 26)).toChar)
+        n = n / 26 - 1
+      } while (n >= 0)
+      sb.reverse.toString
+    }
+    def typeTag(s: Schema): String = s.getType match {
+      case Schema.Type.INT => "int"
+      case Schema.Type.LONG => "long"
+      case Schema.Type.FLOAT => "float"
+      case Schema.Type.DOUBLE => "double"
+      case Schema.Type.STRING => "string"
+      case Schema.Type.BOOLEAN => "bool"
+      case Schema.Type.BYTES => "bytes"
+      case Schema.Type.FIXED => "fixed"
+      case Schema.Type.RECORD => "record"
+      case Schema.Type.ARRAY => "array"
+      case Schema.Type.MAP => "map"
+      case Schema.Type.ENUM => "enum"
+      case Schema.Type.UNION =>
+        // Strip the trailing NULL branch (nullable) and tag by the remaining type.
+        val nonNull = s.getTypes.asScala.filter(_.getType != Schema.Type.NULL)
+        if (nonNull.size == 1) typeTag(nonNull.head) else "union"
+      case _ => "other"
+    }
+
+    if (schema.getType != Schema.Type.RECORD) return schema
+    val newRecord = Schema.createRecord(
+      "SynthAnonRecord",
+      null,
+      "ai.onehouse.lakeloader.synth",
+      false)
+    val newFields = new java.util.ArrayList[Schema.Field]()
+    schema.getFields.asScala.zipWithIndex.foreach { case (f, i) =>
+      val anonName = s"col_${typeTag(f.schema())}_${suffix(i)}"
+      val innerSchema = f.schema().getType match {
+        case Schema.Type.RECORD => anonymizeAvroSchema(f.schema())
+        case _ => f.schema()
+      }
+      newFields.add(new Schema.Field(anonName, innerSchema, null, f.defaultVal()))
+    }
+    newRecord.setFields(newFields)
+    newRecord
+  }
+
+  private def writeAvroSchema(
+      hadoopConf: org.apache.hadoop.conf.Configuration,
+      path: Path,
+      schema: org.apache.avro.Schema): Unit = {
+    val fs = path.getFileSystem(hadoopConf)
+    if (!fs.exists(path.getParent)) fs.mkdirs(path.getParent)
+    var out: FSDataOutputStream = null
+    try {
+      out = fs.create(path, true)
+      val pw = new PrintWriter(out)
+      try pw.write(schema.toString(true)) finally pw.flush()
+    } finally {
+      if (out != null) out.close()
+    }
   }
 
   ///////////////////////
@@ -492,9 +644,14 @@ object WorkloadSynthesizer {
         else s"--partition-distribution '${d.partitionDistribution.mkString(",")}'"
     }
 
+    val schemaLine = d.schemaChoice match {
+      case SuppliedSchema(path) => s"--avro-schema $path"
+      case InferredColumnCount(n) => s"--number-columns $n"
+    }
+
     val base = Seq(
       "--path <fill-in>",
-      "--avro-schema <fill-in>.avsc",
+      schemaLine,
       s"--total-partitions ${d.totalPartitions}",
       s"--record-size ${d.recordSize}",
       s"--datagen-file-size ${d.targetDataFileSize}",
@@ -527,6 +684,10 @@ object WorkloadSynthesizer {
       s"  zipfShape=${d.zipfShape}",
       s"  keyType=${d.keyType}",
       s"  medianRecordsPerRound=${d.medianRecordsPerRound}",
+      s"  schemaChoice=${d.schemaChoice match {
+        case SuppliedSchema(p) => s"SuppliedSchema($p)"
+        case InferredColumnCount(n) => s"InferredColumnCount(numColumns=$n)"
+      }}",
       "",
       "audit-notes:")
     val notes = d.auditNotes.map(n => s"  - $n")

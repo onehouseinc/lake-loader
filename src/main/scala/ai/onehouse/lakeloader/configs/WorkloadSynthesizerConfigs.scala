@@ -19,6 +19,8 @@ import ai.onehouse.lakeloader.configs.KeyTypes.KeyType
 case class SynthesizerConfig(
     tablePath: String = "",
     outputDir: String = "",
+    schemaFile: Option[String] = None,
+    anonymizeSchema: Boolean = false,
     maxCommits: Option[Int] = None,
     sinceInstant: Option[String] = None,
     includeArchived: Boolean = false,
