@@ -14,12 +14,16 @@
 
 package ai.onehouse.lakeloader
 
-import ai.onehouse.lakeloader.WorkloadSynthesizer.CommitAgg
+import ai.onehouse.lakeloader.WorkloadSynthesizer.{CommitAgg, InferredColumnCount, SuppliedSchema}
 import ai.onehouse.lakeloader.configs.{DatagenConfig, KeyTypes, SynthesizerConfig, UpdatePatterns}
 import ai.onehouse.lakeloader.parser.ChangeDataGeneratorParser
 import org.scalatest.funsuite.AnyFunSuite
 
+import scala.collection.JavaConverters._
+
 class WorkloadSynthesizerSpec extends AnyFunSuite {
+
+  private val defaultSchema = InferredColumnCount(10)
 
   private def commit(
       instant: String,
@@ -52,7 +56,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
       commit("t2", inserts = Map("a" -> 900L), updates = Map("a" -> 400L, "b" -> 100L)))
 
     val d = WorkloadSynthesizer.deriveConfig(
-      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), Seq.empty)
+      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, Seq.empty)
 
     assert(d.numRounds == 3)
     assert(d.recordsPerRound == List(1500L, 1300L, 1400L))
@@ -72,7 +76,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
     }.toMap
     val commits = List(commit("t0", inserts = perPartition), commit("t1", inserts = perPartition))
     val d = WorkloadSynthesizer.deriveConfig(
-      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), Seq.empty)
+      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, Seq.empty)
 
     assert(d.updatePattern == UpdatePatterns.Zipf, s"got ${d.updatePattern}")
     assert(math.abs(d.zipfShape - 2.0) < 0.15, s"got ${d.zipfShape}")
@@ -83,7 +87,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
     val perPartition = (1 to 10).map(r => s"p$r" -> 1000L).toMap
     val commits = List(commit("t0", inserts = perPartition), commit("t1", inserts = perPartition))
     val d = WorkloadSynthesizer.deriveConfig(
-      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), Seq.empty)
+      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, Seq.empty)
 
     assert(d.updatePattern == UpdatePatterns.Uniform)
     assert(d.zipfShape == 0.0)
@@ -98,7 +102,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
       commit("t1", inserts = laterRounds),
       commit("t2", inserts = laterRounds))
     val d = WorkloadSynthesizer.deriveConfig(
-      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), Seq.empty)
+      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, Seq.empty)
 
     assert(d.round0PartitionDistribution.isDefined)
   }
@@ -108,7 +112,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
       commit("t0", inserts = Map("a" -> 1000L, "b" -> 500L)),
       commit("t1", inserts = Map("a" -> 800L), updates = Map("a" -> 200L)))
     val d = WorkloadSynthesizer.deriveConfig(
-      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), Seq.empty)
+      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, Seq.empty)
 
     val out = WorkloadSynthesizer.renderFullFlags(d)
 
@@ -130,7 +134,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
   test("renderSummaryFlags collapses per-round counts to median") {
     val commits = (1 to 5).map(i => commit(s"t$i", inserts = Map("a" -> (i * 1000L)))).toList
     val d = WorkloadSynthesizer.deriveConfig(
-      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), Seq.empty)
+      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, Seq.empty)
 
     val out = WorkloadSynthesizer.renderSummaryFlags(d)
     assert(out.contains("--number-records-per-round 3000"), s"expected median=3000 in:\n$out")
@@ -141,7 +145,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
     val flat = (1 to 5).map(r => s"p$r" -> 1000L).toMap
     val flatCommits = List(commit("t0", inserts = flat), commit("t1", inserts = flat))
     val dFlat = WorkloadSynthesizer.deriveConfig(
-      flatCommits, defaultConfig, KeyTypes.Random, "test", Some("key"), Seq.empty)
+      flatCommits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, Seq.empty)
     val outFlat = WorkloadSynthesizer.renderFullFlags(dFlat)
     assert(!outFlat.contains("--zipfian-shape"), s"unexpected zipf flag on uniform:\n$outFlat")
 
@@ -150,7 +154,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
     }.toMap
     val skewedCommits = List(commit("t0", inserts = skewed), commit("t1", inserts = skewed))
     val dSkewed = WorkloadSynthesizer.deriveConfig(
-      skewedCommits, defaultConfig, KeyTypes.Random, "test", Some("key"), Seq.empty)
+      skewedCommits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, Seq.empty)
     val outSkewed = WorkloadSynthesizer.renderFullFlags(dSkewed)
     assert(outSkewed.contains("--zipfian-shape"), s"missing zipf flag on skewed:\n$outSkewed")
   }
@@ -163,7 +167,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
       commit("t1", inserts = laterRounds),
       commit("t2", inserts = laterRounds))
     val d = WorkloadSynthesizer.deriveConfig(
-      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), Seq.empty)
+      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, Seq.empty)
 
     val out = WorkloadSynthesizer.renderFullFlags(d)
     val partLine = out.split("\n").find(_.startsWith("--partition-distribution")).getOrElse("")
@@ -173,11 +177,110 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
   test("renderAudit contains derived values and notes") {
     val commits = List(commit("t0", inserts = Map("a" -> 100L)))
     val d = WorkloadSynthesizer.deriveConfig(
-      commits, defaultConfig, KeyTypes.Random, "cli-override", Some("id"), Seq("note-one"))
+      commits, defaultConfig, KeyTypes.Random, "cli-override", Some("id"), defaultSchema, Seq("note-one"))
     val audit = WorkloadSynthesizer.renderAudit(d, "s3://bucket/table")
     assert(audit.contains("source table: s3://bucket/table"))
     assert(audit.contains("key type source: cli-override"))
     assert(audit.contains("record key field: id"))
     assert(audit.contains("note-one"))
+    assert(audit.contains("schemaChoice=InferredColumnCount(numColumns=10)"))
+  }
+
+  test("renderFullFlags emits --number-columns for InferredColumnCount schema") {
+    val commits = List(commit("t0", inserts = Map("a" -> 100L)))
+    val d = WorkloadSynthesizer.deriveConfig(
+      commits, defaultConfig, KeyTypes.Random, "test", Some("id"),
+      InferredColumnCount(17), Seq.empty)
+    val out = WorkloadSynthesizer.renderFullFlags(d)
+    assert(out.contains("--number-columns 17"), s"expected --number-columns 17 in:\n$out")
+    assert(!out.contains("--avro-schema"), s"should not emit --avro-schema for InferredColumnCount:\n$out")
+  }
+
+  test("renderFullFlags emits --avro-schema for SuppliedSchema") {
+    val commits = List(commit("t0", inserts = Map("a" -> 100L)))
+    val d = WorkloadSynthesizer.deriveConfig(
+      commits, defaultConfig, KeyTypes.Random, "test", Some("id"),
+      SuppliedSchema("/path/to/schema.avsc"), Seq.empty)
+    val out = WorkloadSynthesizer.renderFullFlags(d)
+    assert(out.contains("--avro-schema /path/to/schema.avsc"),
+      s"expected --avro-schema in:\n$out")
+    assert(!out.contains("--number-columns"),
+      s"should not emit --number-columns for SuppliedSchema:\n$out")
+  }
+
+  test("anonymizeAvroSchema rewrites top-level field names by type") {
+    import org.apache.avro.Schema
+    val json =
+      """{
+        |  "type": "record",
+        |  "name": "Customer",
+        |  "namespace": "com.example",
+        |  "fields": [
+        |    {"name": "customer_id", "type": "long"},
+        |    {"name": "email_address", "type": "string"},
+        |    {"name": "signup_ts", "type": "long"},
+        |    {"name": "is_premium", "type": "boolean"},
+        |    {"name": "score", "type": "double"}
+        |  ]
+        |}""".stripMargin
+    val original = new Schema.Parser().parse(json)
+    val anon = WorkloadSynthesizer.anonymizeAvroSchema(original)
+    val names = anon.getFields.asScala.map(_.name()).toList
+    assert(names == List("col_long_a", "col_string_b", "col_long_c", "col_bool_d", "col_double_e"),
+      s"unexpected names: $names")
+    // Types preserved
+    val types = anon.getFields.asScala.map(_.schema().getType).toList
+    assert(types == List(Schema.Type.LONG, Schema.Type.STRING, Schema.Type.LONG,
+      Schema.Type.BOOLEAN, Schema.Type.DOUBLE))
+    // No sensitive names leaked
+    assert(!anon.toString.contains("customer_id"))
+    assert(!anon.toString.contains("email_address"))
+    assert(!anon.toString.contains("Customer"))
+  }
+
+  test("anonymizeAvroSchema handles nullable (union) fields") {
+    import org.apache.avro.Schema
+    val json =
+      """{
+        |  "type": "record",
+        |  "name": "Rec",
+        |  "fields": [
+        |    {"name": "maybe_str", "type": ["null", "string"], "default": null}
+        |  ]
+        |}""".stripMargin
+    val original = new Schema.Parser().parse(json)
+    val anon = WorkloadSynthesizer.anonymizeAvroSchema(original)
+    val f = anon.getFields.asScala.head
+    assert(f.name() == "col_string_a")
+    // The union is preserved intact so lake-loader still generates nullable values.
+    assert(f.schema().getType == Schema.Type.UNION)
+  }
+
+  test("anonymizeAvroSchema recursively renames nested record fields") {
+    import org.apache.avro.Schema
+    val json =
+      """{
+        |  "type": "record",
+        |  "name": "Outer",
+        |  "fields": [
+        |    {"name": "user_name", "type": "string"},
+        |    {"name": "address", "type": {
+        |      "type": "record",
+        |      "name": "Address",
+        |      "fields": [
+        |        {"name": "street_line_1", "type": "string"},
+        |        {"name": "zip", "type": "int"}
+        |      ]
+        |    }}
+        |  ]
+        |}""".stripMargin
+    val original = new Schema.Parser().parse(json)
+    val anon = WorkloadSynthesizer.anonymizeAvroSchema(original)
+    assert(anon.getFields.asScala.map(_.name()).toList == List("col_string_a", "col_record_b"))
+    val nested = anon.getFields.asScala.find(_.name() == "col_record_b").get.schema()
+    assert(nested.getFields.asScala.map(_.name()).toList == List("col_string_a", "col_int_b"))
+    // Sensitive nested names removed
+    assert(!anon.toString.contains("street_line_1"))
+    assert(!anon.toString.contains("user_name"))
   }
 }

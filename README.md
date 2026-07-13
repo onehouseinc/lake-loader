@@ -115,13 +115,16 @@ spark-submit --class ai.onehouse.lakeloader.WorkloadSynthesizer <jar-file> [opti
 | minZipfShapeToEmit       | `--min-zipf-shape`          | Double  | 0.3        | Minimum fitted zipf shape below which the tool emits `Uniform` instead of `Zipf`                        |
 | keySampleSize            | `--key-sample-size`         | Int     | 500        | Number of record-key values to sample from a base parquet file when inferring primary-key type          |
 | primaryKeyTypeOverride   | `--primary-key-type`        | KeyType | inferred   | Skip inference and use this value instead (`Random` \| `TemporallyOrdered`)                             |
+| schemaFile               | `--schema-file`             | String  | none       | Path to a customer-supplied `.avsc`. If set, emit `--avro-schema` and drop `--number-columns`. If unset, tool reads the source Hudi table's schema and emits `--number-columns` matching its top-level field count. |
+| anonymizeSchema          | `--anonymize-schema`        | Boolean | false      | Rewrite field names to typed placeholders (`col_long_a`, `col_string_b`, ...) before writing `schema.avsc` into the output dir. Preserves data types and nullability. Works with both supplied and inferred schemas. |
 
 **Outputs**:
 * `synth-full.flags` — per-commit fidelity: one `--number-records-per-round` entry per source commit, preserving temporal variation.
 * `synth-summary.flags` — median records-per-round collapsed into a single value, for quick sanity runs.
 * `synth-audit.txt` — raw derived numbers, fitted zipf shapes per commit, and key-classification reasoning for review.
+* `schema.avsc` — only when `--anonymize-schema true` (or when `--schema-file` is set and anonymization is on). The emitted flag files reference this path via `--avro-schema`.
 
-The customer only needs to fill in `--path` (benchmark output location) and `--avro-schema` (their schema file) in the emitted flag file before feeding it back into `ChangeDataGenerator`.
+The customer only needs to fill in `--path` (benchmark output location) in the emitted flag file before feeding it back into `ChangeDataGenerator`. Schema is either shipped alongside (as `schema.avsc`) or implied via `--number-columns`.
 
 ## IncrementalLoader Parameters
 

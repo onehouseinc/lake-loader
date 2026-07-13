@@ -97,13 +97,22 @@ spark-submit --class ai.onehouse.lakeloader.WorkloadSynthesizer lake-loader-0.2.
 
 `--max-commits` and `--since-instant` bound the analysis window when a table has a very long history — usually we want the last few weeks, not multi-year archive. `--primary-key-type` skips inference if the customer already knows the shape of their keys. `--min-zipf-shape` is the cutoff below which the fitted skew is treated as uniform (i.e. don't emit `Zipf` for statistical noise).
 
+## Schema handling
+
+Three cases, chosen by the `--schema-file` and `--anonymize-schema` flags:
+
+1. **Customer supplies `.avsc`, no anonymization.** Emitted flags reference the customer's original schema path via `--avro-schema`. Best fidelity; requires the customer to share column names.
+2. **Customer supplies `.avsc`, `--anonymize-schema true`.** Field names are rewritten to typed placeholders (`col_long_a`, `col_string_b`, …); the anonymized schema is written to `outputDir/schema.avsc`, and the emitted flags reference that. Data types, nullability, and nested record structure are preserved.
+3. **No `.avsc` supplied.** Tool reads the source Hudi table's schema, counts top-level fields, and emits `--number-columns <n>` instead of `--avro-schema`. Lake-loader's generator falls back to its default flat schema with the same column arity. No schema file is written unless `--anonymize-schema true`, in which case the inferred schema is anonymized and written to `outputDir/schema.avsc`.
+
+The typical customer flow is case 2 (or case 3 with anonymization on): the tool reads the source table's schema, strips names, and ships an `.avsc` matching the exact type layout. Data types alone drive parquet page layout, compression, and column-store cost — the names are not benchmark-relevant, and stripping them removes the last data-sharing concern.
+
 ## What the tool does *not* do
 
 - It does not read row values except a small key-column sample for classification, and even that only reads the record-key column of one parquet file.
-- It does not attempt to model schema evolution across commits. It assumes the customer will hand off their current schema as an `.avsc`.
+- It does not attempt to model schema evolution across commits. Only the latest schema (from `hoodie.properties` / table create schema) is captured.
 - It does not model composite record keys — those fall back to `Random` with a warning in the audit.
 - It does not attempt to reproduce delete workloads. Deletes are noted in the audit but not emitted as flags; lake-loader's data generator doesn't model them today.
-- It does not sanitize or hash anything. The three output files are trivially reviewable by a human before being sent.
 
 ## Verification path
 

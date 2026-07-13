@@ -57,5 +57,19 @@ object WorkloadSynthesizerParser {
       opt[String]("primary-key-type")
         .action((x, c) => c.copy(primaryKeyTypeOverride = Some(keyTypeRead.reads(x))))
         .text("Skip primary-key inference and use this value instead (Random | TemporallyOrdered)")
+
+      opt[String]("schema-file")
+        .action((x, c) => c.copy(schemaFile = Some(x)))
+        .text("Path to a customer-supplied Avro schema (.avsc). If set, the emitted flag files " +
+          "reference this schema via --avro-schema and drop --number-columns. If not set, the tool " +
+          "reads the source Hudi table's schema and emits --number-columns matching its top-level " +
+          "field count so the generator can produce data with the same column arity.")
+
+      opt[Boolean]("anonymize-schema")
+        .action((x, c) => c.copy(anonymizeSchema = x))
+        .text("If true, rewrite field names in the emitted schema.avsc to typed placeholders " +
+          "(col_int_a, col_long_b, col_string_c, ...). Data types and nullability are preserved; " +
+          "original column names never leave the customer environment. Applies to both " +
+          "customer-supplied schemas and schemas inferred from the source Hudi table. Default: false.")
     }
 }
