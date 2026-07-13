@@ -2,11 +2,13 @@
 
 Lake loader is a tool to benchmark incremental load (writes) to data lakes and warehouses. The tool generates input datasets with configurations to cover different aspects of load patterns - number of records, number of partitions, record size, update to insert ratio, distribution of inserts & updates across partitions and total number of rounds of incremental loads to perform. 
 
-The tool consists of two main components:
+The tool consists of three main components:
 
 **Change data generator** This component takes a specified L pattern and generates rounds of inputs. Each input round has change records, which can be either an insert or an update to an insert in a prior input round.
 
 **Incremental Loader** The loader component implements best practices for loading data into various open table formats using popular cloud data platforms like AWS EMR, Databricks and Snowflake. Round 0 is specially designed to perform a one-time bulk load using the preferred bulk loading methods for the data platform. Round 1 and above simply perform incremental loads using pre-generated input change records from each round.
+
+**Workload Synthesizer** Points at an existing Hudi table, walks its timeline, and emits a `ChangeDataGenerator` configuration that mimics the observed production workload shape (records per round, update ratio, per-partition insert skew, zipf shape, primary-key type). Lets customers hand off a small config artifact instead of raw data. See [docs/workload-synthesizer.md](docs/workload-synthesizer.md) for motivation and design.
 
 ![Figure: Shows the Lake Loader tool's high-level functioning to benchmark incremental loads across popular cloud data platforms.
 ](src/main/resources/images/lakeLoaderArch.png)
@@ -91,6 +93,35 @@ spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator <jar-file> [opti
 **Notes**:
 * **Record count specification**: `--number-records-per-round` accepts a comma-separated list of record counts (e.g., `22000000,22000` for a large initial load followed by smaller incremental rounds). A single value applies uniformly to all rounds. If fewer values are provided than the number of rounds, the last value is repeated for remaining rounds.
 * **Per-round variation**: The same list semantics apply to `--update-ratio`, `--update-pattern`, `--num-partitions-to-update`, and `--zipfian-shape`. This is useful when a workload has diurnal or bursty characteristics — for example, `--update-ratio 0.05,0.05,0.05,0.05,0.05,0.05,0.4,0.4,0.4,0.4,0.4,0.4` models 6 overnight rounds at 5% updates followed by 6 business-hours rounds at 40%. If fewer values than rounds are supplied, the last value is repeated. If more values than rounds are supplied, the tail is truncated.
+
+## WorkloadSynthesizer Parameters
+
+The WorkloadSynthesizer component analyzes an existing Hudi table and emits `ChangeDataGenerator` flag files that reproduce the observed workload shape. Full motivation and derivation details are in [docs/workload-synthesizer.md](docs/workload-synthesizer.md).
+
+**CLI:**
+```bash
+spark-submit --class ai.onehouse.lakeloader.WorkloadSynthesizer <jar-file> [options]
+```
+
+### Parameter Reference
+
+| Parameter                | CLI Flag                    | Type    | Default    | Description                                                                                             |
+|--------------------------|-----------------------------|---------|------------|---------------------------------------------------------------------------------------------------------|
+| tablePath                | `-t`, `--table-path`        | String  | *required* | Path to an existing Hudi table to characterize                                                          |
+| outputDir                | `-o`, `--output-dir`        | String  | *required* | Directory where `synth-full.flags`, `synth-summary.flags`, and `synth-audit.txt` will be written        |
+| maxCommits               | `--max-commits`             | Int     | all        | Cap on the number of most-recent completed commits considered                                           |
+| sinceInstant             | `--since-instant`           | String  | none       | Only consider commits with instant time >= this value (Hudi instant string, e.g. `20250101120000`)      |
+| includeArchived          | `--include-archived`        | Boolean | false      | Also walk the archived timeline (slower)                                                                |
+| minZipfShapeToEmit       | `--min-zipf-shape`          | Double  | 0.3        | Minimum fitted zipf shape below which the tool emits `Uniform` instead of `Zipf`                        |
+| keySampleSize            | `--key-sample-size`         | Int     | 500        | Number of record-key values to sample from a base parquet file when inferring primary-key type          |
+| primaryKeyTypeOverride   | `--primary-key-type`        | KeyType | inferred   | Skip inference and use this value instead (`Random` \| `TemporallyOrdered`)                             |
+
+**Outputs**:
+* `synth-full.flags` — per-commit fidelity: one `--number-records-per-round` entry per source commit, preserving temporal variation.
+* `synth-summary.flags` — median records-per-round collapsed into a single value, for quick sanity runs.
+* `synth-audit.txt` — raw derived numbers, fitted zipf shapes per commit, and key-classification reasoning for review.
+
+The customer only needs to fill in `--path` (benchmark output location) and `--avro-schema` (their schema file) in the emitted flag file before feeding it back into `ChangeDataGenerator`.
 
 ## IncrementalLoader Parameters
 
