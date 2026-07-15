@@ -80,9 +80,12 @@ class WorkloadSynthesizerE2ESpec extends AnyFunSuite with BeforeAndAfterAll {
       StructField("ts", LongType, nullable = false),
       StructField("value", IntegerType, nullable = true)))
     val now = System.currentTimeMillis()
+    // NB: raw UUID (no per-commit prefix). If we prefix with $keyPrefix, footer min/max
+    // of the record-key column both start with the prefix char and the classifier can't
+    // see UUID-domain saturation across the low..high hex range.
     val insertRows = partitionWeights.toSeq.flatMap { case (partition, count) =>
       (0L until count).map { i =>
-        Row(s"$keyPrefix-${UUID.randomUUID()}", partition, now + i, i.toInt)
+        Row(UUID.randomUUID().toString, partition, now + i, i.toInt)
       }
     }
     val updateRows = keysToUpdate.map { k =>
@@ -167,10 +170,12 @@ class WorkloadSynthesizerE2ESpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(parsed.totalPartitions == 5, s"expected totalPartitions=5, got ${parsed.totalPartitions}")
     // Updates only in commits 1 and 2. Roughly (0 + 30/(30+400) + 30/(30+400)) / 3 ≈ 0.047 avg.
     // Give a generous window since Hudi reports may differ slightly.
-    assert(parsed.updateRatio < 0.15, s"expected small update ratio, got ${parsed.updateRatio}")
+    // Post-#53: updateRatio/updatePattern are single-element lists (scalar-broadcast).
+    assert(parsed.updateRatios.head < 0.15,
+      s"expected small update ratio, got ${parsed.updateRatios.head}")
     // Uniform inserts → Uniform pattern expected
-    assert(parsed.updatePattern == UpdatePatterns.Uniform,
-      s"expected Uniform pattern, got ${parsed.updatePattern}")
+    assert(parsed.updatePatterns.head == UpdatePatterns.Uniform,
+      s"expected Uniform pattern, got ${parsed.updatePatterns.head}")
     // UUID-shaped keys → Random
     assert(parsed.keyType == KeyTypes.Random, s"expected Random key type, got ${parsed.keyType}")
 
@@ -201,12 +206,12 @@ class WorkloadSynthesizerE2ESpec extends AnyFunSuite with BeforeAndAfterAll {
     val parsed = parseEmittedFullFlags(outputDir)
     assert(parsed.numberOfRounds == 2)
     assert(parsed.totalPartitions == 10, s"expected 10 partitions, got ${parsed.totalPartitions}")
-    assert(parsed.updatePattern == UpdatePatterns.Zipf,
-      s"expected Zipf pattern on skewed inserts, got ${parsed.updatePattern}")
+    assert(parsed.updatePatterns.head == UpdatePatterns.Zipf,
+      s"expected Zipf pattern on skewed inserts, got ${parsed.updatePatterns.head}")
     // Fitted shape from ground-truth s=2. Hudi's writes shuffle records across
     // executors and some file-group placement noise creeps in; allow ±0.4.
-    assert(math.abs(parsed.zipfianShape - 2.0) < 0.4,
-      s"expected zipf shape ~2.0, got ${parsed.zipfianShape}")
+    assert(math.abs(parsed.zipfianShapes.head - 2.0) < 0.4,
+      s"expected zipf shape ~2.0, got ${parsed.zipfianShapes.head}")
     // Top partition should carry the largest share
     assert(parsed.partitionDistribution.isDefined)
     val partDist = ChangeDataGeneratorParser.parsePartitionDistribution(
