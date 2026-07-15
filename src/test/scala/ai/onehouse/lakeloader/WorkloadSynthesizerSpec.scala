@@ -14,7 +14,7 @@
 
 package ai.onehouse.lakeloader
 
-import ai.onehouse.lakeloader.WorkloadSynthesizer.{CommitAgg, InferredColumnCount, SuppliedSchema}
+import ai.onehouse.lakeloader.WorkloadSynthesizer.{CommitAgg, FooterSample, InferredColumnCount, SuppliedSchema}
 import ai.onehouse.lakeloader.configs.{DatagenConfig, KeyTypes, SynthesizerConfig, UpdatePatterns}
 import ai.onehouse.lakeloader.parser.ChangeDataGeneratorParser
 import org.scalatest.funsuite.AnyFunSuite
@@ -282,5 +282,110 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
     // Sensitive nested names removed
     assert(!anon.toString.contains("street_line_1"))
     assert(!anon.toString.contains("user_name"))
+  }
+
+  ///////////////////////
+  // Footer-based key-type inference
+  ///////////////////////
+
+  test("extractInstantFromFileName parses Hudi-style base file names") {
+    // <fileId>_<writeToken>_<instantTime>.parquet
+    val name = "s3://bucket/table/2025-01-01/e3c9-1_0-0-0_20250101120000.parquet"
+    assert(WorkloadSynthesizer.extractInstantFromFileName(name) == "20250101120000")
+  }
+
+  test("extractInstantFromFileName returns empty when name doesn't match Hudi pattern") {
+    assert(WorkloadSynthesizer.extractInstantFromFileName("/path/to/data.parquet") == "")
+  }
+
+  test("spearmanRankCorrelation returns ~1.0 for monotonic input") {
+    val instants = Seq("20250101", "20250102", "20250103", "20250104", "20250105")
+    val mins = Seq("a", "b", "c", "d", "e")
+    val corr = WorkloadSynthesizer.spearmanRankCorrelation(instants, mins)
+    assert(math.abs(corr - 1.0) < 1e-9, s"expected ~1.0, got $corr")
+  }
+
+  test("spearmanRankCorrelation returns ~-1.0 for reversed input") {
+    val instants = Seq("20250101", "20250102", "20250103", "20250104")
+    val mins = Seq("d", "c", "b", "a")
+    val corr = WorkloadSynthesizer.spearmanRankCorrelation(instants, mins)
+    assert(math.abs(corr + 1.0) < 1e-9, s"expected ~-1.0, got $corr")
+  }
+
+  test("spearmanRankCorrelation returns ~0 for uncorrelated input") {
+    // instants monotonic; mins scrambled — should be near 0
+    val instants = Seq("t1", "t2", "t3", "t4", "t5", "t6")
+    val mins = Seq("c", "a", "e", "b", "f", "d")
+    val corr = WorkloadSynthesizer.spearmanRankCorrelation(instants, mins)
+    assert(math.abs(corr) < 0.6, s"expected small |corr|, got $corr")
+  }
+
+  test("spearmanRankCorrelation returns 0 for n<2") {
+    assert(WorkloadSynthesizer.spearmanRankCorrelation(Seq("a"), Seq("b")) == 0.0)
+    assert(WorkloadSynthesizer.spearmanRankCorrelation(Seq.empty, Seq.empty) == 0.0)
+  }
+
+  test("classifyFromFooterStats: UUID-shaped random keys → Random") {
+    // Every file has min starting with a low hex char and max starting with a high hex char
+    val samples = (1 to 10).map { i =>
+      FooterSample(
+        path = s"/f$i.parquet",
+        instantTime = s"2025010${i}",
+        min = Some(f"0${i}${randomHexTail(6)}"),
+        max = Some(f"f${i}${randomHexTail(6)}"))
+    }.toList
+    val (kt, source, notes) = WorkloadSynthesizer.classifyFromFooterStats(samples)
+    assert(kt == KeyTypes.Random, s"expected Random, got $kt")
+    assert(source.contains("uuid") || source.contains("random"), s"got $source")
+  }
+
+  test("classifyFromFooterStats: monotonic epoch-prefix → TemporallyOrdered") {
+    // Each file's min and max grow monotonically with instant
+    val samples = (1 to 10).map { i =>
+      FooterSample(
+        path = s"/f$i.parquet",
+        instantTime = f"2025010${i}%d",
+        min = Some(f"170000${i}%d"),
+        max = Some(f"170000${i}%d"))
+    }.toList
+    val (kt, _, notes) = WorkloadSynthesizer.classifyFromFooterStats(samples)
+    assert(kt == KeyTypes.TemporallyOrdered, s"expected TemporallyOrdered, got $kt")
+  }
+
+  test("classifyFromFooterStats: hybrid (temporal + random suffix) → TemporallyOrdered with hybrid note") {
+    // Snowflake-ID style: leading char encodes a coarse timestamp bucket (drifts
+    // upward with instant time), with a random suffix. Within one file, min and
+    // max have different leading chars (wide range), but the file's overall
+    // min-value ordering correlates with instant time — because the leading
+    // bucket char shifts. Min head does NOT saturate '0' (so not UUID-shaped).
+    val minHeads = "34567".toIndexedSeq // never '0'..'3', so hexShapeRatio never saturates
+    val maxHeads = "89abc".toIndexedSeq // ends short of 'f', but max head still > min head
+    val samples = (0 until 10).map { i =>
+      val bucket = i / 2 // 0..4, growing with time
+      FooterSample(
+        path = s"/f$i.parquet",
+        instantTime = f"2025010${i}%d",
+        min = Some(s"${minHeads(bucket)}${randomHexTail(6)}"),
+        max = Some(s"${maxHeads(bucket)}${randomHexTail(6)}"))
+    }.toList
+    val (kt, source, notes) = WorkloadSynthesizer.classifyFromFooterStats(samples)
+    assert(kt == KeyTypes.TemporallyOrdered, s"expected TemporallyOrdered for hybrid, got $kt")
+    assert(source == "footer-stats-hybrid-temporal-random",
+      s"got source=$source, notes=$notes")
+  }
+
+  test("classifyFromFooterStats: fewer than 3 usable samples → Random with insufficient note") {
+    val samples = List(
+      FooterSample("/f1.parquet", "1", Some("a"), Some("z")),
+      FooterSample("/f2.parquet", "2", None, None))
+    val (kt, source, notes) = WorkloadSynthesizer.classifyFromFooterStats(samples)
+    assert(kt == KeyTypes.Random)
+    assert(source == "insufficient-footer-stats")
+  }
+
+  private def randomHexTail(len: Int): String = {
+    val r = new scala.util.Random(42)
+    val chars = "0123456789abcdef"
+    (1 to len).map(_ => chars(r.nextInt(chars.length))).mkString
   }
 }

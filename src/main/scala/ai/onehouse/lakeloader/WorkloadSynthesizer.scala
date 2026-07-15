@@ -509,59 +509,301 @@ object WorkloadSynthesizer {
     }
     val keyCol = keyFields.head
 
-    try {
-      val samplePath = pickSampleParquetPath(metaClient)
-      samplePath match {
+    val hadoopConf = spark.sparkContext.hadoopConfiguration
+    val sampled: List[FooterSample] =
+      try sampleFooterStats(metaClient, keyCol, config.keySampleFiles, hadoopConf)
+      catch {
+        case e: Exception =>
+          notes += s"footer sampling failed: ${e.getClass.getSimpleName}: ${e.getMessage}"
+          Nil
+      }
+    notes += s"sampled ${sampled.size} base parquet file footers for record-key column '$keyCol'"
+
+    if (sampled.size >= 3) {
+      val (kt, source, extra) = classifyFromFooterStats(sampled)
+      notes ++= extra
+      (kt, source, Some(keyCol), notes.toSeq)
+    } else {
+      // Not enough files for a footer-based inference. Fall back to reading actual
+      // key values from whatever single file we did find.
+      notes += "fewer than 3 base files available for footer sampling — falling back to value read"
+      sampled.headOption match {
         case None =>
-          notes += "no base parquet file found to sample — defaulting to Random"
+          notes += "no base parquet file found — defaulting to Random"
           (KeyTypes.Random, "no-sample-available", Some(keyCol), notes.toSeq)
-        case Some(path) =>
-          val samples = spark.read.parquet(path)
-            .select(keyCol)
-            .limit(config.keySampleSize)
-            .collect()
-            .flatMap(r => Option(r.get(0)).map(_.toString))
-          notes += s"sampled ${samples.length} key values from $path"
-          classifyKeySamples(samples, keyCol, notes)
+        case Some(fs) =>
+          try {
+            val samples = spark.read.parquet(fs.path)
+              .select(keyCol)
+              .limit(config.keySampleSize)
+              .collect()
+              .flatMap(r => Option(r.get(0)).map(_.toString))
+            notes += s"sampled ${samples.length} key values from ${fs.path}"
+            classifyKeyValueSamples(samples, keyCol, notes)
+          } catch {
+            case e: Exception =>
+              notes += s"value read failed: ${e.getClass.getSimpleName}: ${e.getMessage}"
+              (KeyTypes.Random, "sampling-failed", Some(keyCol), notes.toSeq)
+          }
       }
-    } catch {
-      case e: Exception =>
-        notes += s"key sampling failed: ${e.getClass.getSimpleName}: ${e.getMessage}"
-        (KeyTypes.Random, "sampling-failed", Some(keyCol), notes.toSeq)
     }
   }
 
-  private def pickSampleParquetPath(metaClient: HoodieTableMetaClient): Option[String] = {
-    val basePath = metaClient.getBasePath.toString
+  ///////////////////////
+  // Footer-based key sampling
+  ///////////////////////
+
+  private[lakeloader] case class FooterSample(
+      path: String,
+      instantTime: String,
+      min: Option[String],
+      max: Option[String])
+
+  /**
+   * Locate up to `maxFiles` base parquet files across the table, spread over
+   * as many partitions as possible (round-robin per partition), and extract
+   * the min/max value + instant time for `keyCol` from each parquet footer.
+   * Never materializes actual row values into memory.
+   */
+  private[lakeloader] def sampleFooterStats(
+      metaClient: HoodieTableMetaClient,
+      keyCol: String,
+      maxFiles: Int,
+      hadoopConf: org.apache.hadoop.conf.Configuration): List[FooterSample] = {
     val storage = metaClient.getStorage
-    val root = new org.apache.hudi.storage.StoragePath(basePath)
-    findFirstParquet(storage, root, maxDepth = 4)
-  }
+    val basePath = new org.apache.hudi.storage.StoragePath(metaClient.getBasePath.toString)
 
-  private def findFirstParquet(
-      storage: org.apache.hudi.storage.HoodieStorage,
-      p: org.apache.hudi.storage.StoragePath,
-      maxDepth: Int): Option[String] = {
-    if (maxDepth < 0) return None
-    val entriesTry =
-      try Some(storage.listDirectEntries(p).asScala)
-      catch { case _: Exception => None }
-    entriesTry.flatMap { raw =>
-      val visible = raw
-        .filter(e => !e.getPath.getName.startsWith(".") && !e.getPath.getName.startsWith("_"))
-      val hit = visible.collectFirst {
-        case e if e.isFile && e.getPath.getName.endsWith(".parquet") => e.getPath.toString
-      }
-      hit.orElse {
-        visible.iterator
-          .filter(_.isDirectory)
-          .flatMap(e => findFirstParquet(storage, e.getPath, maxDepth - 1).iterator)
-          .toStream.headOption
+    // Collect one list of base .parquet paths per partition directory found up to depth 5.
+    val partitionFiles: List[List[String]] = listParquetByPartition(storage, basePath, maxDepth = 5)
+    if (partitionFiles.isEmpty) return Nil
+
+    // Round-robin across partitions to get spread. Take `maxFiles` total.
+    val roundRobin = interleave(partitionFiles).take(maxFiles).toList
+
+    roundRobin.flatMap { pathStr =>
+      readFooterKeyStats(pathStr, keyCol, hadoopConf).map { case (minOpt, maxOpt) =>
+        FooterSample(
+          path = pathStr,
+          instantTime = extractInstantFromFileName(pathStr),
+          min = minOpt,
+          max = maxOpt)
       }
     }
   }
 
-  private def classifyKeySamples(
+  /** Walk the storage tree, returning parquet file paths grouped by their parent directory. */
+  private def listParquetByPartition(
+      storage: org.apache.hudi.storage.HoodieStorage,
+      root: org.apache.hudi.storage.StoragePath,
+      maxDepth: Int): List[List[String]] = {
+    val grouped = scala.collection.mutable.LinkedHashMap[String, scala.collection.mutable.ArrayBuffer[String]]()
+    def walk(p: org.apache.hudi.storage.StoragePath, depth: Int): Unit = {
+      if (depth < 0) return
+      val entries =
+        try storage.listDirectEntries(p).asScala
+        catch { case _: Exception => return }
+      val visible = entries.filter { e =>
+        val n = e.getPath.getName
+        !n.startsWith(".") && !n.startsWith("_")
+      }
+      visible.foreach { e =>
+        if (e.isFile && e.getPath.getName.endsWith(".parquet")) {
+          val parent = e.getPath.getParent.toString
+          grouped.getOrElseUpdate(parent, scala.collection.mutable.ArrayBuffer.empty) += e.getPath.toString
+        } else if (e.isDirectory) {
+          walk(e.getPath, depth - 1)
+        }
+      }
+    }
+    walk(root, maxDepth)
+    grouped.values.map(_.toList).toList
+  }
+
+  private def interleave[T](lists: List[List[T]]): Iterator[T] = new Iterator[T] {
+    private val its = lists.map(_.iterator).filter(_.hasNext).toBuffer
+    private var idx = 0
+    override def hasNext: Boolean = its.nonEmpty
+    override def next(): T = {
+      if (its.isEmpty) throw new NoSuchElementException
+      idx = idx % its.size
+      val it = its(idx)
+      val v = it.next()
+      if (!it.hasNext) its.remove(idx)
+      else idx += 1
+      v
+    }
+  }
+
+  /**
+   * Hudi encodes base file names as `<fileId>_<writeToken>_<instantTime>.parquet`.
+   * We only need the instant string; empty if the pattern doesn't match.
+   */
+  private[lakeloader] def extractInstantFromFileName(pathStr: String): String = {
+    val name = pathStr.substring(pathStr.lastIndexOf('/') + 1)
+    val stem = if (name.endsWith(".parquet")) name.dropRight(".parquet".length) else name
+    val parts = stem.split("_")
+    if (parts.length >= 3) parts.last else ""
+  }
+
+  /**
+   * Read the parquet footer of `path` and locate `keyCol`; aggregate min/max across
+   * all row groups. Returns None on any I/O or statistics-availability failure so
+   * caller can skip the file cleanly.
+   */
+  private def readFooterKeyStats(
+      path: String,
+      keyCol: String,
+      hadoopConf: org.apache.hadoop.conf.Configuration): Option[(Option[String], Option[String])] = {
+    import org.apache.parquet.hadoop.ParquetFileReader
+    import org.apache.parquet.format.converter.ParquetMetadataConverter
+    try {
+      val meta = ParquetFileReader.readFooter(
+        hadoopConf,
+        new org.apache.hadoop.fs.Path(path),
+        ParquetMetadataConverter.NO_FILTER)
+      var overallMin: Option[String] = None
+      var overallMax: Option[String] = None
+      meta.getBlocks.asScala.foreach { block =>
+        block.getColumns.asScala.foreach { col =>
+          if (col.getPath.toDotString == keyCol || col.getPath.toArray.lastOption.contains(keyCol)) {
+            val stats = col.getStatistics
+            if (stats != null && !stats.isEmpty && stats.hasNonNullValue) {
+              val mn = Option(stats.genericGetMin).map(_.toString)
+              val mx = Option(stats.genericGetMax).map(_.toString)
+              overallMin = combineMin(overallMin, mn)
+              overallMax = combineMax(overallMax, mx)
+            }
+          }
+        }
+      }
+      Some((overallMin, overallMax))
+    } catch {
+      case _: Exception => None
+    }
+  }
+
+  private def combineMin(a: Option[String], b: Option[String]): Option[String] = (a, b) match {
+    case (None, x) => x
+    case (x, None) => x
+    case (Some(x), Some(y)) => Some(if (x.compareTo(y) <= 0) x else y)
+  }
+
+  private def combineMax(a: Option[String], b: Option[String]): Option[String] = (a, b) match {
+    case (None, x) => x
+    case (x, None) => x
+    case (Some(x), Some(y)) => Some(if (x.compareTo(y) >= 0) x else y)
+  }
+
+  /**
+   * Classification from footer min/max samples ordered by commit instant time.
+   * Three signals, in order of decreasing confidence:
+   *
+   *  - **Random / UUID-shaped**: min values start with the low hex domain
+   *    (mostly '0'..'3') and max values start with the high hex domain
+   *    (mostly 'c'..'f') in almost every sampled file. Each file individually
+   *    spans a wide chunk of the [0..f] hex domain.
+   *  - **TemporallyOrdered**: file min/max monotonically increase with instant
+   *    time (Spearman rank correlation ≥ 0.7 between instant and min).
+   *  - **Hybrid**: temporal correlation is strong (≥ 0.7) but per-file range
+   *    is still wide (min ≠ max prefix). Treated as TemporallyOrdered downstream
+   *    with a note in the audit.
+   */
+  private[lakeloader] def classifyFromFooterStats(
+      samples: List[FooterSample]): (KeyType, String, Seq[String]) = {
+    val notes = scala.collection.mutable.ArrayBuffer[String]()
+    val valid = samples.filter(s => s.min.isDefined && s.max.isDefined)
+    if (valid.size < 3) {
+      notes += s"only ${valid.size} sampled files had usable min/max stats — defaulting to Random"
+      return (KeyTypes.Random, "insufficient-footer-stats", notes.toSeq)
+    }
+
+    // Signal 1: UUID-domain saturation. UUIDs are lowercase hex; a random-hash
+    // key column will have mins near '0' and maxes near 'f' in most files.
+    val lowChars = "0123".toSet
+    val highChars = "cdef".toSet
+    val hexShapeHits = valid.count { s =>
+      val minChar = s.min.get.headOption.map(_.toLower).getOrElse(' ')
+      val maxChar = s.max.get.headOption.map(_.toLower).getOrElse(' ')
+      lowChars.contains(minChar) && highChars.contains(maxChar)
+    }
+    val hexShapeRatio = hexShapeHits.toDouble / valid.size
+    notes += f"footer stats: uuid-domain-saturation=${hexShapeRatio}%.2f (${hexShapeHits}/${valid.size} files)"
+
+    // Signal 2: Temporal correlation. Rank both instantTime and min, compute Spearman.
+    val timedSamples = valid.filter(_.instantTime.nonEmpty)
+    val temporalCorr =
+      if (timedSamples.size < 3) 0.0
+      else spearmanRankCorrelation(
+        timedSamples.map(_.instantTime),
+        timedSamples.map(_.min.get))
+    notes += f"footer stats: temporal-correlation(instant vs min)=$temporalCorr%.3f"
+
+    // Signal 3: Per-file range width — for UUIDs, min-prefix ≠ max-prefix in most files.
+    val widePerFile = valid.count { s =>
+      val mn = s.min.get
+      val mx = s.max.get
+      mn.headOption.map(_.toLower) != mx.headOption.map(_.toLower)
+    }
+    val widePerFileRatio = widePerFile.toDouble / valid.size
+    notes += f"footer stats: per-file-range-width=${widePerFileRatio}%.2f"
+
+    // Decision. UUID-domain saturation is the strongest signal — if almost every
+    // file spans low-hex-min and high-hex-max, the column is a random hash,
+    // regardless of any accidental correlation with commit time. Hybrid
+    // temporal-prefix + random-suffix keys are still classified as
+    // TemporallyOrdered because that reflects how they behave in an ingestion
+    // index (locality dominated by the time prefix).
+    if (hexShapeRatio >= 0.9) {
+      (KeyTypes.Random, "footer-stats-uuid-random", notes.toSeq)
+    } else if (temporalCorr >= 0.7) {
+      if (widePerFileRatio >= 0.5) {
+        notes += "sample looks hybrid (temporal + random suffix); emitting TemporallyOrdered"
+        (KeyTypes.TemporallyOrdered, "footer-stats-hybrid-temporal-random", notes.toSeq)
+      } else {
+        (KeyTypes.TemporallyOrdered, "footer-stats-monotonic", notes.toSeq)
+      }
+    } else if (hexShapeRatio >= 0.5) {
+      // Moderate UUID signal but no monotonic trend — Random is the safer bet.
+      (KeyTypes.Random, "footer-stats-random-weak-signal", notes.toSeq)
+    } else {
+      notes += "footer stats ambiguous — defaulting to Random"
+      (KeyTypes.Random, "footer-stats-ambiguous", notes.toSeq)
+    }
+  }
+
+  /** Spearman rank correlation between two equal-length sequences of comparable values. */
+  private[lakeloader] def spearmanRankCorrelation(a: Seq[String], b: Seq[String]): Double = {
+    require(a.size == b.size, s"ranks require equal-length input: ${a.size} vs ${b.size}")
+    val n = a.size
+    if (n < 2) return 0.0
+    def ranks(xs: Seq[String]): Seq[Double] = {
+      val sorted = xs.zipWithIndex.sortBy(_._1)
+      val ranked = new Array[Double](n)
+      sorted.zipWithIndex.foreach { case ((_, origIdx), rankIdx) =>
+        ranked(origIdx) = rankIdx.toDouble + 1.0
+      }
+      ranked.toIndexedSeq
+    }
+    val ra = ranks(a)
+    val rb = ranks(b)
+    val meanA = ra.sum / n
+    val meanB = rb.sum / n
+    var num = 0.0
+    var denA = 0.0
+    var denB = 0.0
+    ra.zip(rb).foreach { case (x, y) =>
+      val dx = x - meanA
+      val dy = y - meanB
+      num += dx * dy
+      denA += dx * dx
+      denB += dy * dy
+    }
+    val den = math.sqrt(denA * denB)
+    if (den == 0.0) 0.0 else num / den
+  }
+
+  /** Legacy value-read classifier, used as a fallback when < 3 base files exist. */
+  private def classifyKeyValueSamples(
       samples: Array[String],
       keyCol: String,
       notes: scala.collection.mutable.ArrayBuffer[String]): (KeyType, String, Option[String], Seq[String]) = {
@@ -577,12 +819,12 @@ object WorkloadSynthesizer {
     notes += f"key shape stats: uuid-prefix=${uuidLike.toDouble / n}%.2f, epoch-prefix=${epochLike.toDouble / n}%.2f, monotonic=$monotonic"
 
     if (uuidLike.toDouble / n > 0.9) {
-      (KeyTypes.Random, "uuid-prefix-sample", Some(keyCol), notes.toSeq)
+      (KeyTypes.Random, "value-fallback-uuid-prefix", Some(keyCol), notes.toSeq)
     } else if (epochLike.toDouble / n > 0.9 || monotonic) {
-      (KeyTypes.TemporallyOrdered, "epoch-or-monotonic-sample", Some(keyCol), notes.toSeq)
+      (KeyTypes.TemporallyOrdered, "value-fallback-epoch-or-monotonic", Some(keyCol), notes.toSeq)
     } else {
       notes += "sample looked ambiguous — defaulting to Random"
-      (KeyTypes.Random, "ambiguous-sample-defaulted-random", Some(keyCol), notes.toSeq)
+      (KeyTypes.Random, "value-fallback-ambiguous", Some(keyCol), notes.toSeq)
     }
   }
 
