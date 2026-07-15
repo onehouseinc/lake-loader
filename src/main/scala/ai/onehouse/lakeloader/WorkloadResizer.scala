@@ -138,6 +138,14 @@ object WorkloadResizer {
       scaled: DerivedConfig,
       sourceCommitStats: List[CommitStat],
       config: ResizerConfig): (DerivedConfig, List[Run]) = {
+    // Distinguish "commitStats missing entirely" (older synth-derived.json
+    // that predates the burstiness support in the synthesizer) from
+    // "workload is genuinely too short to bucket." Both fall back to
+    // scalars, but the audit call site can emit different notes.
+    if (sourceCommitStats.isEmpty) {
+      return (scaled.copy(auditNotes = scaled.auditNotes :+
+        "bucketize requested but synth-derived.json has no commitStats; emitting scalar params"), Nil)
+    }
     if (sourceCommitStats.size < 2) return (scaled, Nil)
 
     val shapes = sourceCommitStats.map(cs =>

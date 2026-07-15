@@ -92,6 +92,9 @@ object BucketRun {
         meanUpdateRatio = sumUR / n,
         meanRecordsPerCommit = sumRecs / n,
         meanInsertZipfShape = sumZipf / n,
+        // math.round is HALF_UP: 2.5 -> 3. Min-clamped to 1 so a run's
+        // "no partitions updated" (all-insert commits) still gives us a
+        // usable value downstream.
         meanPartitionsUpdated = math.max(1, math.round(sumPart / n).toInt))
     }
 
