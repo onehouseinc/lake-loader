@@ -274,6 +274,10 @@ object WorkloadSynthesizer {
       val vec = c.partitionInserts.values.toSeq.sorted(Ordering[Long].reverse)
       if (vec.size >= 2) Some(TimelineStats.fitZipfShape(vec)) else None
     }
+    // updateShapes is a defensive fallback for tables where every commit was
+    // pure updates (no inserts on any commit — rare, e.g. long-lived
+    // compaction-only or restore-heavy tables). Normal tables always have
+    // inserts in round 0 so insertShapes drives the fit.
     val updateShapes = commits.flatMap { c =>
       val vec = c.partitionUpdates.values.toSeq.sorted(Ordering[Long].reverse)
       if (vec.size >= 2) Some(TimelineStats.fitZipfShape(vec)) else None
@@ -308,6 +312,7 @@ object WorkloadSynthesizer {
       s"partitions ever written: $totalPartitions",
       s"fitted zipf shapes (per commit, inserts): ${insertShapes.map(s => f"$s%.3f").mkString(", ")}",
       s"fitted zipf shapes (per commit, updates): ${updateShapes.map(s => f"$s%.3f").mkString(", ")}",
+      f"median fitted zipf shape=$fittedShape%.3f, min-zipf-threshold=${config.minZipfShapeToEmit}%.3f -> $updatePattern",
       s"round-0 differs from tail: ${round0Distribution.isDefined}")
 
     DerivedConfig(
@@ -510,14 +515,19 @@ object WorkloadSynthesizer {
     val keyCol = keyFields.head
 
     val hadoopConf = spark.sparkContext.hadoopConfiguration
+    val footerFailures = scala.collection.mutable.ArrayBuffer.empty[String]
     val sampled: List[FooterSample] =
-      try sampleFooterStats(metaClient, keyCol, config.keySampleFiles, hadoopConf)
+      try sampleFooterStats(metaClient, keyCol, config.keySampleFiles, hadoopConf, footerFailures)
       catch {
         case e: Exception =>
-          notes += s"footer sampling failed: ${e.getClass.getSimpleName}: ${e.getMessage}"
+          notes += s"footer sampling failed globally: ${e.getClass.getSimpleName}: ${e.getMessage}"
           Nil
       }
     notes += s"sampled ${sampled.size} base parquet file footers for record-key column '$keyCol'"
+    if (footerFailures.nonEmpty) {
+      notes += s"footer read failures: ${footerFailures.size} (showing up to 3)"
+      footerFailures.take(3).foreach(f => notes += s"  - $f")
+    }
 
     if (sampled.size >= 3) {
       val (kt, source, extra) = classifyFromFooterStats(sampled)
@@ -569,7 +579,8 @@ object WorkloadSynthesizer {
       metaClient: HoodieTableMetaClient,
       keyCol: String,
       maxFiles: Int,
-      hadoopConf: org.apache.hadoop.conf.Configuration): List[FooterSample] = {
+      hadoopConf: org.apache.hadoop.conf.Configuration,
+      failures: scala.collection.mutable.ArrayBuffer[String] = scala.collection.mutable.ArrayBuffer.empty[String]): List[FooterSample] = {
     val storage = metaClient.getStorage
     val basePath = new org.apache.hudi.storage.StoragePath(metaClient.getBasePath.toString)
 
@@ -581,12 +592,16 @@ object WorkloadSynthesizer {
     val roundRobin = interleave(partitionFiles).take(maxFiles).toList
 
     roundRobin.flatMap { pathStr =>
-      readFooterKeyStats(pathStr, keyCol, hadoopConf).map { case (minOpt, maxOpt) =>
-        FooterSample(
-          path = pathStr,
-          instantTime = extractInstantFromFileName(pathStr),
-          min = minOpt,
-          max = maxOpt)
+      readFooterKeyStats(pathStr, keyCol, hadoopConf) match {
+        case Right((minOpt, maxOpt)) =>
+          Some(FooterSample(
+            path = pathStr,
+            instantTime = extractInstantFromFileName(pathStr),
+            min = minOpt,
+            max = maxOpt))
+        case Left(reason) =>
+          failures += s"$pathStr: $reason"
+          None
       }
     }
   }
@@ -628,6 +643,9 @@ object WorkloadSynthesizer {
       idx = idx % its.size
       val it = its(idx)
       val v = it.next()
+      // Invariant: when we drain and remove its(idx), the buffer element that was
+      // at idx+1 slides into idx — so the *next* call naturally moves on without
+      // an explicit idx++. We only increment idx when we did NOT remove.
       if (!it.hasNext) its.remove(idx)
       else idx += 1
       v
@@ -647,13 +665,15 @@ object WorkloadSynthesizer {
 
   /**
    * Read the parquet footer of `path` and locate `keyCol`; aggregate min/max across
-   * all row groups. Returns None on any I/O or statistics-availability failure so
-   * caller can skip the file cleanly.
+   * all row groups. Returns `Right((min, max))` on success (either bound may be None
+   * if the file had no non-null statistics for the column), or `Left(reason)` when
+   * the footer couldn't be read at all. Callers accumulate the failure reasons and
+   * surface them in the audit rather than silently dropping files.
    */
   private def readFooterKeyStats(
       path: String,
       keyCol: String,
-      hadoopConf: org.apache.hadoop.conf.Configuration): Option[(Option[String], Option[String])] = {
+      hadoopConf: org.apache.hadoop.conf.Configuration): Either[String, (Option[String], Option[String])] = {
     import org.apache.parquet.hadoop.ParquetFileReader
     import org.apache.parquet.format.converter.ParquetMetadataConverter
     try {
@@ -676,9 +696,9 @@ object WorkloadSynthesizer {
           }
         }
       }
-      Some((overallMin, overallMax))
+      Right((overallMin, overallMax))
     } catch {
-      case _: Exception => None
+      case e: Exception => Left(s"${e.getClass.getSimpleName}: ${e.getMessage}")
     }
   }
 

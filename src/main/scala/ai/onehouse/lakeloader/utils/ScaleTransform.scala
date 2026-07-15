@@ -15,11 +15,11 @@
 package ai.onehouse.lakeloader.utils
 
 /**
- * Pure-math transformations used by WorkloadScaler to scale a workload
+ * Pure-math transformations used by WorkloadResizer to scale a workload
  * derived by WorkloadSynthesizer up or down along two independent axes:
  * total data volume and total partition count.
  *
- * Kept dependency-free so the scaler and its unit tests do not need Spark
+ * Kept dependency-free so the resizer and its unit tests do not need Spark
  * or Hudi on the classpath.
  */
 object ScaleTransform {
