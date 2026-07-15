@@ -50,16 +50,16 @@ def generateWorkload(
   roundsDistribution: List[Long],
   numColumns: Int = 10,
   recordSize: Int = 1024,
-  updateRatio: Float = 0.5f,
+  updateRatios: List[Double] = List(0.5),
   totalPartitions: Int = -1,
   partitionDistributionMatrixOpt: Option[List[List[Double]]] = None,
   datagenFileSize: Int = 128 * 1024 * 1024,
   skipIfExists: Boolean = false,
   startRound: Int = 0,
   primaryKeyType: KeyType = KeyType.Random,
-  updatePatterns: UpdatePatterns = UpdatePatterns.Uniform,
-  numPartitionsToUpdate: Int = -1,
-  zipfianShape: Double = 2.93
+  updatePatterns: List[UpdatePatterns] = List(UpdatePatterns.Uniform),
+  numPartitionsToUpdate: List[Int] = List(-1),
+  zipfianShapes: List[Double] = List(2.93)
 )
 ```
 
@@ -77,19 +77,20 @@ spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator <jar-file> [opti
 | roundsDistribution    | `--number-records-per-round`           | List[Long]     | 1000000    | Comma-separated record counts per round. A single value applies to all rounds; if fewer values than rounds, the last value is repeated. |
 | numColumns            | `--number-columns`                     | Int            | 10         | Number of columns in schema of generated data (min: 5)          |
 | recordSize            | `--record-size`                        | Int            | 1024       | Record size of generated data in bytes                          |
-| updateRatio           | `--update-ratio`                       | Double         | 0.5        | Ratio of updates to total records (0.0-1.0)                     |
+| updateRatios          | `--update-ratio`                       | List[Double]   | 0.5        | Ratio of updates to total records (0.0-1.0). Single value applies to all rounds; comma-separated list applies per-round with last-value fill. |
 | totalPartitions       | `--total-partitions`                   | Int            | -1         | Total number of partitions (-1 for unpartitioned)               |
 | datagenFileSize       | `--datagen-file-size`                  | Int            | 134217728  | Target data file size in bytes (default: 128MB)                 |
 | skipIfExists          | `--skip-if-exists`                     | Boolean        | false      | Skip generation if folder already exists                        |
 | startRound            | `--start-round`                        | Int            | 0          | Starting round number (for resuming generation)                 |
 | primaryKeyType        | `--primary-key-type`                   | KeyType        | Random     | Key generation type: `Random`, `TemporallyOrdered`              |
-| updatePatterns        | `--update-pattern`                     | UpdatePatterns | Uniform    | Update distribution: `Uniform`, `Zipf`                          |
-| numPartitionsToUpdate | `--num-partitions-to-update`           | Int            | -1         | Number of partitions to update (-1 for all)                     |
-| zipfianShape          | `--zipfian-shape`                      | Double         | 2.93       | Shape parameter for Zipf distribution (higher = more skewed)    |
+| updatePatterns        | `--update-pattern`                     | List[UpdatePatterns] | Uniform | Update distribution: `Uniform`, `Zipf`. Single value applies to all rounds; comma-separated list applies per-round with last-value fill. |
+| numPartitionsToUpdate | `--num-partitions-to-update`           | List[Int]      | -1         | Number of partitions to update (-1 for all). Single value applies to all rounds; comma-separated list applies per-round with last-value fill. |
+| zipfianShapes         | `--zipfian-shape`                      | List[Double]   | 2.93       | Shape parameter for Zipf distribution (higher = more skewed). Single value applies to all rounds; comma-separated list applies per-round with last-value fill. |
 | partitionDistribution | `--partition-distribution`             | String         | uniform    | Leading per-partition insert weights, zero-padded up to `--total-partitions`. Each segment must sum to 1.0. Use `;` to give round 0 a different distribution than rounds 1+ (e.g. `;0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1` → round 0 uniform, rounds 1+ concentrated in first 10 partitions). An empty segment = uniform across all partitions for that batch. |
 
 **Notes**:
 * **Record count specification**: `--number-records-per-round` accepts a comma-separated list of record counts (e.g., `22000000,22000` for a large initial load followed by smaller incremental rounds). A single value applies uniformly to all rounds. If fewer values are provided than the number of rounds, the last value is repeated for remaining rounds.
+* **Per-round variation**: The same list semantics apply to `--update-ratio`, `--update-pattern`, `--num-partitions-to-update`, and `--zipfian-shape`. This is useful when a workload has diurnal or bursty characteristics — for example, `--update-ratio 0.05,0.05,0.05,0.05,0.05,0.05,0.4,0.4,0.4,0.4,0.4,0.4` models 6 overnight rounds at 5% updates followed by 6 business-hours rounds at 40%. If fewer values than rounds are supplied, the last value is repeated. If more values than rounds are supplied, the tail is truncated.
 
 ## IncrementalLoader Parameters
 
