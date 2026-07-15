@@ -203,6 +203,43 @@ object WorkloadResizer {
       }
     }
 
+    // commitStats is an array of flat objects — extract the array body, split into
+    // per-entry object strings, then pull scalar fields from each. Tolerates any
+    // whitespace between entries but assumes no nested brackets.
+    val commitStats: List[WorkloadSynthesizer.CommitStat] = {
+      val re = "\"commitStats\"\\s*:\\s*\\[([\\s\\S]*?)\\]".r
+      re.findFirstMatchIn(json) match {
+        case None => Nil
+        case Some(m) =>
+          val body = m.group(1).trim
+          if (body.isEmpty) Nil
+          else {
+            // Split on the boundary between adjacent objects. Each entry starts with { and ends with }.
+            val entries = body.split("\\}\\s*,\\s*\\{").toList
+            entries.map { rawIn =>
+              val raw = "{" + rawIn.stripPrefix("{").stripSuffix("}") + "}"
+              def strField(k: String): String = {
+                val fre = ("\"" + java.util.regex.Pattern.quote(k) + "\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"").r
+                fre.findFirstMatchIn(raw).map(_.group(1))
+                  .getOrElse(throw new IllegalArgumentException(s"commitStat missing string field: $k"))
+              }
+              def numField(k: String): String = {
+                val fre = ("\"" + java.util.regex.Pattern.quote(k) + "\"\\s*:\\s*(-?[0-9][0-9.eE+\\-]*)").r
+                fre.findFirstMatchIn(raw).map(_.group(1))
+                  .getOrElse(throw new IllegalArgumentException(s"commitStat missing numeric field: $k"))
+              }
+              WorkloadSynthesizer.CommitStat(
+                instantTime = strField("instantTime"),
+                inserts = numField("inserts").toLong,
+                updates = numField("updates").toLong,
+                numPartitionsWithInserts = numField("numPartitionsWithInserts").toInt,
+                numPartitionsWithUpdates = numField("numPartitionsWithUpdates").toInt,
+                insertZipfShape = numField("insertZipfShape").toDouble)
+            }
+          }
+      }
+    }
+
     val recordsPerRound = listVal("recordsPerRound").map(parseLongList).getOrElse(Nil)
     val partitionDistribution = listVal("partitionDistribution").map(parseDoubleList).getOrElse(Nil)
     val round0PartitionDistribution: Option[List[Double]] =
@@ -234,6 +271,7 @@ object WorkloadResizer {
       keyTypeSource = stringVal("keyTypeSource").getOrElse("unknown"),
       recordKeyField = stringVal("recordKeyField"),
       schemaChoice = schemaChoice,
+      commitStats = commitStats,
       auditNotes = Seq(s"source: ${stringVal("sourceTablePath").getOrElse("<unknown>")}"))
   }
 }

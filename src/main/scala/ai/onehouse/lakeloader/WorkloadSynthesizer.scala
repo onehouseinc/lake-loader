@@ -57,6 +57,21 @@ object WorkloadSynthesizer {
       freshFileSizes: Seq[Long])
 
   /**
+   * Per-source-commit summary emitted in `synth-derived.json` for the
+   * WorkloadResizer to consume. Volumes are unscaled; they represent the
+   * observed source workload. Used by the resizer's `--bucketize` mode to
+   * detect runs of similarly-shaped commits and emit per-round parameter
+   * lists that reproduce the source's burstiness.
+   */
+  private[lakeloader] case class CommitStat(
+      instantTime: String,
+      inserts: Long,
+      updates: Long,
+      numPartitionsWithInserts: Int,
+      numPartitionsWithUpdates: Int,
+      insertZipfShape: Double)
+
+  /**
    * How the emitted flag file should describe the schema shape.
    *
    *  - `SuppliedSchema(path)`: customer handed off an .avsc; emit --avro-schema
@@ -86,6 +101,7 @@ object WorkloadSynthesizer {
       keyTypeSource: String,
       recordKeyField: Option[String],
       schemaChoice: SchemaChoice,
+      commitStats: List[CommitStat],
       auditNotes: Seq[String])
 
   def main(args: Array[String]): Unit = {
@@ -280,6 +296,22 @@ object WorkloadSynthesizer {
     }
     val effectiveShapes = if (insertShapes.nonEmpty) insertShapes else updateShapes
     val fittedShape = if (effectiveShapes.isEmpty) 0.0 else TimelineStats.median(effectiveShapes)
+
+    // Per-commit stats emitted in the machine-readable JSON. The resizer's
+    // --bucketize mode groups adjacent commits with similar characteristics
+    // and emits per-round parameter lists to reproduce workload burstiness.
+    val commitStats: List[CommitStat] = commits.map { c =>
+      val insertVec = c.partitionInserts.values.toSeq.sorted(Ordering[Long].reverse)
+      val commitInsertShape =
+        if (insertVec.size >= 2) roundTo(TimelineStats.fitZipfShape(insertVec), 3) else 0.0
+      CommitStat(
+        instantTime = c.instant,
+        inserts = c.inserts,
+        updates = c.updates,
+        numPartitionsWithInserts = c.partitionInserts.size,
+        numPartitionsWithUpdates = c.partitionUpdates.size,
+        insertZipfShape = commitInsertShape)
+    }
     val (updatePattern, zipfShape) =
       if (fittedShape >= config.minZipfShapeToEmit)
         (UpdatePatterns.Zipf, roundTo(fittedShape, 3))
@@ -327,6 +359,7 @@ object WorkloadSynthesizer {
       keyTypeSource = keyTypeSource,
       recordKeyField = recordKeyField,
       schemaChoice = schemaChoice,
+      commitStats = commitStats,
       auditNotes = auditNotes)
   }
 
@@ -887,9 +920,23 @@ object WorkloadSynthesizer {
     sb.append(s"""  "keyType": ${q(d.keyType.toString)},""").append("\n")
     sb.append(s"""  "keyTypeSource": ${q(d.keyTypeSource)},""").append("\n")
     sb.append(s"""  "recordKeyField": ${d.recordKeyField.map(q).getOrElse("null")},""").append("\n")
-    sb.append(s"""  "schemaChoice": $schemaJson""").append("\n")
+    sb.append(s"""  "schemaChoice": $schemaJson,""").append("\n")
+    sb.append(s"""  "commitStats": ${renderCommitStats(d.commitStats)}""").append("\n")
     sb.append("}\n")
     sb.toString
+  }
+
+  private def renderCommitStats(stats: List[CommitStat]): String = {
+    def q(s: String): String =
+      "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+    if (stats.isEmpty) return "[]"
+    val entries = stats.map { s =>
+      s"""{"instantTime":${q(s.instantTime)},"inserts":${s.inserts},""" +
+        s""""updates":${s.updates},"numPartitionsWithInserts":${s.numPartitionsWithInserts},""" +
+        s""""numPartitionsWithUpdates":${s.numPartitionsWithUpdates},""" +
+        s""""insertZipfShape":${s.insertZipfShape}}"""
+    }
+    entries.mkString("[\n    ", ",\n    ", "\n  ]")
   }
 
   private def writeText(fs: org.apache.hadoop.fs.FileSystem, path: Path, content: String): Unit = {

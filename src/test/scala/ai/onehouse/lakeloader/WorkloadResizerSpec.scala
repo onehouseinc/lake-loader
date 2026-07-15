@@ -47,6 +47,7 @@ class WorkloadResizerSpec extends AnyFunSuite {
       keyTypeSource = "test",
       recordKeyField = Some("id"),
       schemaChoice = InferredColumnCount(10),
+      commitStats = Nil,
       auditNotes = Seq("test note"))
 
   test("applyScale with factor=1.0 and no partition change is a no-op") {
