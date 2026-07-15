@@ -102,7 +102,15 @@ object WorkloadSynthesizer {
       recordKeyField: Option[String],
       schemaChoice: SchemaChoice,
       commitStats: List[CommitStat],
-      auditNotes: Seq[String])
+      auditNotes: Seq[String],
+      // When defined, the flag renderer emits comma-separated per-round lists for
+      // these four params instead of the scalar `updateRatio` / `updatePattern` /
+      // `numPartitionsToUpdate` / `zipfShape` fields. Populated by the resizer's
+      // --bucketize mode to reproduce workload burstiness.
+      perRoundUpdateRatios: Option[List[Double]] = None,
+      perRoundUpdatePatterns: Option[List[UpdatePatterns.UpdatePatterns]] = None,
+      perRoundNumPartitionsToUpdate: Option[List[Int]] = None,
+      perRoundZipfShapes: Option[List[Double]] = None)
 
   def main(args: Array[String]): Unit = {
     WorkloadSynthesizerParser.parser.parse(args, SynthesizerConfig()) match {
@@ -979,20 +987,39 @@ object WorkloadSynthesizer {
       case InferredColumnCount(n) => s"--number-columns $n"
     }
 
+    // Per-round list overrides (from --bucketize) or scalar fallbacks.
+    val updateRatioLine = d.perRoundUpdateRatios match {
+      case Some(list) => s"--update-ratio ${list.mkString(",")}"
+      case None => s"--update-ratio ${d.updateRatio}"
+    }
+    val numPartsToUpdateLine = d.perRoundNumPartitionsToUpdate match {
+      case Some(list) => s"--num-partitions-to-update ${list.mkString(",")}"
+      case None => s"--num-partitions-to-update ${d.numPartitionsToUpdate}"
+    }
+    val updatePatternLine = d.perRoundUpdatePatterns match {
+      case Some(list) => s"--update-pattern ${list.mkString(",")}"
+      case None => s"--update-pattern ${d.updatePattern}"
+    }
+
     val base = Seq(
       "--path <fill-in>",
       schemaLine,
       s"--total-partitions ${d.totalPartitions}",
       s"--record-size ${d.recordSize}",
       s"--datagen-file-size ${d.targetDataFileSize}",
-      s"--update-ratio ${d.updateRatio}",
-      s"--num-partitions-to-update ${d.numPartitionsToUpdate}",
-      s"--update-pattern ${d.updatePattern}",
+      updateRatioLine,
+      numPartsToUpdateLine,
+      updatePatternLine,
       s"--primary-key-type ${d.keyType}")
 
-    val withZipf =
-      if (d.updatePattern == UpdatePatterns.Zipf) base :+ s"--zipfian-shape ${d.zipfShape}"
-      else base
+    // Emit --zipfian-shape when either (a) per-round list is set, or (b) the scalar
+    // updatePattern is Zipf (existing behavior).
+    val withZipf = d.perRoundZipfShapes match {
+      case Some(list) => base :+ s"--zipfian-shape ${list.mkString(",")}"
+      case None =>
+        if (d.updatePattern == UpdatePatterns.Zipf) base :+ s"--zipfian-shape ${d.zipfShape}"
+        else base
+    }
     if (partDist.isEmpty) withZipf else withZipf :+ partDist
   }
 

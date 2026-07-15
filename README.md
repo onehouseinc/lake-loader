@@ -151,11 +151,17 @@ java -cp <jar-file> ai.onehouse.lakeloader.WorkloadResizer [options]
 | outputDir          | `-o`, `--output-dir`        | String  | *required*       | Directory for `resized-full.flags`, `resized-summary.flags`, `resized-audit.txt`                                                                         |
 | scaleFactor        | `--scale-factor`            | Double  | 1.0              | Multiplier on per-round record counts. e.g. `0.01` → one-hundredth the volume. `numRounds` unchanged                                                     |
 | targetPartitions   | `--target-partitions`       | Int     | preserved        | New total partition count. Truncates + re-normalizes if smaller than source; extrapolates fitted zipf shape if larger. Rescales `numPartitionsToUpdate` |
+| bucketize          | `--bucketize`               | Boolean | false            | Detect runs of adjacent commits with similar characteristics in the source and emit per-round parameter lists (`--update-ratio`, `--update-pattern`, `--zipfian-shape`, `--num-partitions-to-update`) reflecting the observed burstiness. Requires `commitStats` in the input JSON. |
+| bucketUpdateRatioAbs | `--bucket-update-ratio-abs` | Double | 0.1              | Absolute update-ratio delta threshold for run boundaries.                                                                                                |
+| bucketZipfShapeAbs   | `--bucket-zipf-shape-abs`   | Double | 0.3              | Absolute zipf-shape delta threshold for run boundaries.                                                                                                  |
+| bucketRecordsRelPct  | `--bucket-records-rel-pct`  | Double | 0.25             | Relative records-per-commit delta threshold for run boundaries.                                                                                          |
 
 **Outputs**:
-* `resized-full.flags` — scaled flag string with per-commit record counts scaled by `--scale-factor`.
+* `resized-full.flags` — scaled flag string with per-commit record counts scaled by `--scale-factor`. With `--bucketize`, also emits per-round `--update-ratio` / `--update-pattern` / `--zipfian-shape` / `--num-partitions-to-update` lists.
 * `resized-summary.flags` — scaled flag string with single median records-per-round.
-* `resized-audit.txt` — before/after values for every changed parameter and a list of preserved invariants.
+* `resized-audit.txt` — before/after values for every changed parameter, a list of preserved invariants, and (when `--bucketize`) a table of detected runs.
+
+**Bucketize semantics.** When `--bucketize true` is passed, the resizer walks the source commit stats and groups adjacent commits into runs sharing similar update-ratio, insert-zipf shape, and records-per-commit. Each run then emits its mean values applied to every commit in that run, producing per-round lists whose length equals the source commit count. If the source workload is flat (single run), scalars are emitted as before. **Requires the target `ChangeDataGenerator` to support per-round list flags** (introduced in PR #53).
 
 ## IncrementalLoader Parameters
 

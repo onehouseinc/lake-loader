@@ -18,4 +18,8 @@ case class ResizerConfig(
     inputJson: String = "",
     outputDir: String = "",
     scaleFactor: Double = 1.0,
-    targetPartitions: Option[Int] = None)
+    targetPartitions: Option[Int] = None,
+    bucketize: Boolean = false,
+    bucketUpdateRatioAbs: Double = 0.1,
+    bucketZipfShapeAbs: Double = 0.3,
+    bucketRecordsRelPct: Double = 0.25)

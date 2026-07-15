@@ -14,10 +14,11 @@
 
 package ai.onehouse.lakeloader
 
-import ai.onehouse.lakeloader.WorkloadSynthesizer.{DerivedConfig, InferredColumnCount, SchemaChoice, SuppliedSchema}
+import ai.onehouse.lakeloader.WorkloadSynthesizer.{CommitStat, DerivedConfig, InferredColumnCount, SchemaChoice, SuppliedSchema}
 import ai.onehouse.lakeloader.configs.{KeyTypes, ResizerConfig, UpdatePatterns}
 import ai.onehouse.lakeloader.parser.WorkloadResizerParser
-import ai.onehouse.lakeloader.utils.ScaleTransform
+import ai.onehouse.lakeloader.utils.{BucketRun, ScaleTransform}
+import ai.onehouse.lakeloader.utils.BucketRun.{CommitShape, Run, Thresholds}
 
 import java.io.{File, PrintWriter}
 import scala.io.Source
@@ -53,12 +54,17 @@ object WorkloadResizer {
 
     val source = parseSynthDerivedJson(readFile(config.inputJson))
     val scaled = applyScale(source, config)
+    val (finalConfig, detectedRuns) =
+      if (config.bucketize) applyBucketize(scaled, source.commitStats, config)
+      else (scaled, Nil)
 
     val outDir = new File(config.outputDir)
     if (!outDir.exists()) outDir.mkdirs()
-    writeFile(new File(outDir, "resized-full.flags"), WorkloadSynthesizer.renderFullFlags(scaled))
-    writeFile(new File(outDir, "resized-summary.flags"), WorkloadSynthesizer.renderSummaryFlags(scaled))
-    writeFile(new File(outDir, "resized-audit.txt"), renderScaleAudit(source, scaled, config))
+    writeFile(new File(outDir, "resized-full.flags"), WorkloadSynthesizer.renderFullFlags(finalConfig))
+    writeFile(new File(outDir, "resized-summary.flags"), WorkloadSynthesizer.renderSummaryFlags(finalConfig))
+    writeFile(
+      new File(outDir, "resized-audit.txt"),
+      renderScaleAudit(source, finalConfig, config, detectedRuns))
     println(s"[WorkloadResizer] Wrote resized-full.flags, resized-summary.flags, and resized-audit.txt to ${config.outputDir}")
   }
 
@@ -113,15 +119,95 @@ object WorkloadResizer {
         s"source partitions=${source.totalPartitions}, target partitions=$targetPartitions"))
   }
 
+  ///////////////////////
+  // Bucketize application
+  ///////////////////////
+
+  /**
+   * Detect runs of adjacent commits with similar characteristics in the source
+   * workload's commit stats, and populate per-round parameter lists on the
+   * scaled config. Emits per-round update-ratio, update-pattern, zipf-shape,
+   * and num-partitions-to-update lists that reproduce the source workload's
+   * burstiness pattern.
+   *
+   * If fewer than 2 commits are available or all commits collapse to a single
+   * run (flat workload), the scaled config is returned unchanged and per-round
+   * lists are not populated (falls back to scalar flags).
+   */
+  private[lakeloader] def applyBucketize(
+      scaled: DerivedConfig,
+      sourceCommitStats: List[CommitStat],
+      config: ResizerConfig): (DerivedConfig, List[Run]) = {
+    if (sourceCommitStats.size < 2) return (scaled, Nil)
+
+    val shapes = sourceCommitStats.map(cs =>
+      CommitShape(cs.inserts, cs.updates, cs.insertZipfShape, cs.numPartitionsWithUpdates))
+    val thresholds = Thresholds(
+      updateRatioAbs = config.bucketUpdateRatioAbs,
+      zipfShapeAbs = config.bucketZipfShapeAbs,
+      recordsRelPct = config.bucketRecordsRelPct)
+    val runs = BucketRun.detectRuns(shapes, thresholds)
+
+    if (runs.size < 2) return (scaled, runs) // flat workload, no bucketization
+
+    val perRoundUR = BucketRun.expandPerRound(runs, r => round3(r.meanUpdateRatio))
+    val perRoundPattern = BucketRun.expandPerRound(runs, r =>
+      if (r.meanInsertZipfShape >= 0.3) UpdatePatterns.Zipf else UpdatePatterns.Uniform)
+    val perRoundZipf = BucketRun.expandPerRound(runs, r => round3(r.meanInsertZipfShape))
+    // Preserve source-partition fraction, applied to *scaled* totalPartitions.
+    val srcTotalParts = math.max(sourceCommitStats.maxBy(_.numPartitionsWithInserts).numPartitionsWithInserts, 1)
+    val perRoundParts = BucketRun.expandPerRound(runs, r =>
+      ScaleTransform.scaleNumPartitionsToUpdate(
+        r.meanPartitionsUpdated,
+        srcTotalParts,
+        scaled.totalPartitions))
+
+    val bucketized = scaled.copy(
+      perRoundUpdateRatios = Some(perRoundUR),
+      perRoundUpdatePatterns = Some(perRoundPattern),
+      perRoundNumPartitionsToUpdate = Some(perRoundParts),
+      perRoundZipfShapes = Some(perRoundZipf),
+      auditNotes = scaled.auditNotes ++ Seq(s"bucketized into ${runs.size} runs"))
+    (bucketized, runs)
+  }
+
+  private def round3(x: Double): Double = math.round(x * 1000.0) / 1000.0
+
+  ///////////////////////
+  // Audit rendering
+  ///////////////////////
+
   private[lakeloader] def renderScaleAudit(
       source: DerivedConfig,
       scaled: DerivedConfig,
-      config: ResizerConfig): String = {
+      config: ResizerConfig,
+      runs: List[Run] = Nil): String = {
+    val bucketSection: Seq[String] =
+      if (!config.bucketize || runs.isEmpty) Nil
+      else if (runs.size < 2) Seq(
+        "",
+        s"bucketize: source workload is flat (only ${runs.size} run detected); emitting scalar params.")
+      else {
+        val header = Seq(
+          "",
+          s"bucketize: detected ${runs.size} runs of adjacent similar commits",
+          f"  thresholds: update-ratio<=${config.bucketUpdateRatioAbs}%.3f, " +
+            f"zipf-shape<=${config.bucketZipfShapeAbs}%.3f, records-rel<=${config.bucketRecordsRelPct}%.3f",
+          "  commit-range | size | mean-update-ratio | mean-records | mean-zipf | mean-partitions-updated")
+        val rows = runs.map { r =>
+          f"  [${r.firstCommitIndex}%3d..${r.lastCommitIndex}%3d] | ${r.size}%4d | " +
+            f"${r.meanUpdateRatio}%.3f            | ${r.meanRecordsPerCommit}%12.1f | " +
+            f"${r.meanInsertZipfShape}%.3f     | ${r.meanPartitionsUpdated}%4d"
+        }
+        header ++ rows
+      }
+
     val lines = Seq(
       "# WorkloadResizer audit",
       s"input: ${config.inputJson}",
       s"scale factor: ${config.scaleFactor}",
       s"target partitions: ${config.targetPartitions.map(_.toString).getOrElse("<preserved from source>")}",
+      s"bucketize: ${config.bucketize}",
       "",
       "before / after:",
       f"  totalPartitions:       ${source.totalPartitions}%d -> ${scaled.totalPartitions}%d",
@@ -135,7 +221,7 @@ object WorkloadResizer {
       s"  zipfShape=${source.zipfShape}",
       s"  recordSize=${source.recordSize}",
       s"  targetDataFileSize=${source.targetDataFileSize}",
-      s"  keyType=${source.keyType}")
+      s"  keyType=${source.keyType}") ++ bucketSection
     lines.mkString("\n") + "\n"
   }
 

@@ -43,5 +43,24 @@ object WorkloadResizerParser {
           "When smaller than source, the leading N zipf-shape weights are kept; when larger, the fitted " +
           "zipf shape is extrapolated to fill the new partition count. --num-partitions-to-update is " +
           "rescaled to preserve the same fraction of updated partitions as the source workload.")
+
+      opt[Boolean]("bucketize")
+        .action((x, c) => c.copy(bucketize = x))
+        .text("Detect runs of adjacent commits with similar characteristics (update-ratio, insert-zipf " +
+          "shape, records-per-commit) in the source workload and emit per-round parameter lists that " +
+          "reproduce the observed burstiness. Requires synth-derived.json to contain commitStats. " +
+          "Default: false (emits scalar params, backward compatible).")
+
+      opt[Double]("bucket-update-ratio-abs")
+        .action((x, c) => c.copy(bucketUpdateRatioAbs = x))
+        .text("Absolute update-ratio delta threshold for bucketize run detection. Default: 0.1")
+
+      opt[Double]("bucket-zipf-shape-abs")
+        .action((x, c) => c.copy(bucketZipfShapeAbs = x))
+        .text("Absolute zipf-shape delta threshold for bucketize run detection. Default: 0.3")
+
+      opt[Double]("bucket-records-rel-pct")
+        .action((x, c) => c.copy(bucketRecordsRelPct = x))
+        .text("Relative records-per-commit delta threshold for bucketize run detection. Default: 0.25")
     }
 }

@@ -102,15 +102,27 @@ The split matters because scaling is inherently *destination-driven*: the custom
 
 **Invariants under resizing** — never touched: `updateRatio`, `updatePattern`, `zipfianShape`, `primary-key-type`, `recordSize`, `targetDataFileSize`, `schemaChoice`. These are per-record or per-workload-character properties; scaling data volume shouldn't change them.
 
+**Burstiness (`--bucketize`).** The Synthesizer emits per-commit facts (`commitStats` in `synth-derived.json`) — inserts, updates, insert-zipf shape, and partitions touched, one entry per source commit. The Resizer's `--bucketize` flag walks that sequence and detects **runs of adjacent similar commits** by three thresholds:
+
+- update-ratio delta ≤ 0.1 (absolute)
+- insert-zipf shape delta ≤ 0.3 (absolute)
+- records-per-commit delta ≤ 25% (relative)
+
+All three must be within tolerance against the running-mean of the current run buffer, otherwise a new run is started. Each detected run emits its mean values applied to every commit in that run, producing per-round lists whose length equals the source commit count. Result: the emitted `resized-full.flags` contains commas-separated `--update-ratio`, `--update-pattern`, `--zipfian-shape`, `--num-partitions-to-update` matching the source workload's burstiness pattern. This lets a benchmark of, say, 24 daily commits reproduce a "quiet overnight, busy business-hours" pattern without needing to run for 24 hours of wall clock time.
+
+If the source is flat (single run detected), scalars are emitted as before. `--bucketize true` requires `ChangeDataGenerator` support for per-round list flags (introduced separately in PR #53).
+
 Example workflow:
 
 ```bash
-# On benchmarking side, downscale a 3000-partition 1 PB table to 300 partitions × 1% volume
+# On benchmarking side, downscale a 3000-partition 1 PB table to 300 partitions × 1% volume,
+# reproducing observed diurnal burstiness across the source's commit sequence.
 spark-submit --class ai.onehouse.lakeloader.WorkloadResizer lake-loader-0.2.jar \
   --input-json  /path/to/synth-derived.json \
   --output-dir  /path/to/resized-configs \
   --scale-factor    0.01 \
-  --target-partitions 300
+  --target-partitions 300 \
+  --bucketize       true
 
 # Then run the benchmark
 spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator lake-loader-0.2.jar \
