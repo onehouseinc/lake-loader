@@ -173,4 +173,15 @@ class PerRoundParamsTest extends AnyFunSuite {
       UpdatePatterns.Uniform, UpdatePatterns.Zipf, UpdatePatterns.Zipf,
       UpdatePatterns.Zipf, UpdatePatterns.Zipf))
   }
+
+  test("padOrTruncate(list, 0) returns empty regardless of input length") {
+    assert(padOrTruncate(List(1, 2, 3), 0) == Nil)
+    assert(padOrTruncate(List(42), 0) == Nil)
+  }
+
+  test("--num-partitions-to-update accepts -1 as unbounded sentinel") {
+    // Any list mixing -1 with valid partition counts should parse.
+    val cfg = parse(Array("--path", "/tmp/out", "--num-partitions-to-update", "-1,10,-1"))
+    assert(cfg.numPartitionsToUpdate == List(-1, 10, -1))
+  }
 }

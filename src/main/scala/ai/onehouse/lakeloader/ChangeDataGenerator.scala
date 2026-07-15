@@ -136,9 +136,11 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     require(updatePatterns.nonEmpty, "updatePatterns must not be empty")
     require(numPartitionsToUpdate.nonEmpty, "numPartitionsToUpdate must not be empty")
     require(zipfianShapes.nonEmpty, "zipfianShapes must not be empty")
+    // `-1` is the documented sentinel for "no partition-count constraint";
+    // any non-negative value must not exceed totalPartitions.
     require(
-      numPartitionsToUpdate.forall(n => n <= totalPartitions),
-      s"All entries of numPartitionsToUpdate must be <= totalPartitions=$totalPartitions; got $numPartitionsToUpdate")
+      numPartitionsToUpdate.forall(n => n == -1 || n <= totalPartitions),
+      s"Each numPartitionsToUpdate entry must be -1 (unbounded) or <= totalPartitions=$totalPartitions; got $numPartitionsToUpdate")
 
     // Compute records distribution matrix across partitions; such matrix
     // could be explicitly provided as an optional parameter prescribing corresponding
