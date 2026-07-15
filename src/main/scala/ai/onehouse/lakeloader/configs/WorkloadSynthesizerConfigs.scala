@@ -26,4 +26,5 @@ case class SynthesizerConfig(
     includeArchived: Boolean = false,
     minZipfShapeToEmit: Double = 0.3,
     primaryKeyTypeOverride: Option[KeyType] = None,
+    keySampleFiles: Int = 100,
     keySampleSize: Int = 500)

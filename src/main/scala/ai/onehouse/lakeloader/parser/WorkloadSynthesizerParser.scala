@@ -50,9 +50,15 @@ object WorkloadSynthesizerParser {
         .action((x, c) => c.copy(minZipfShapeToEmit = x))
         .text("Minimum fitted zipf shape below which we emit Uniform instead of Zipf. Default: 0.3")
 
+      opt[Int]("key-sample-files")
+        .action((x, c) => c.copy(keySampleFiles = x))
+        .text("Number of base parquet files to sample when inferring primary-key type from footer min/max " +
+          "statistics. Sampled files are spread across partitions. Default: 100")
+
       opt[Int]("key-sample-size")
         .action((x, c) => c.copy(keySampleSize = x))
-        .text("Number of record-key values to sample from a base parquet file when inferring primary-key type. Default: 500")
+        .text("Fallback: if fewer than 3 base files are available for footer sampling, read up to this " +
+          "many actual record-key values from one file for classification. Default: 500")
 
       opt[String]("primary-key-type")
         .action((x, c) => c.copy(primaryKeyTypeOverride = Some(keyTypeRead.reads(x))))
