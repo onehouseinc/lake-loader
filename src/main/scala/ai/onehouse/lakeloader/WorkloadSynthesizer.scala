@@ -461,16 +461,14 @@ object WorkloadSynthesizer {
     import org.apache.hudi.metadata.NativeTableMetadataFactory
 
     val notes = scala.collection.mutable.ArrayBuffer[String]()
-    if (config.partitionSizeSample <= 0) {
-      notes += "partition-size sampling disabled (--partition-size-sample <= 0)"
-      return (PartitionSizeStats(0, Nil, 0L), notes.toSeq)
-    }
 
     try {
       val engineCtx = new HoodieLocalEngineContext(storageConf)
       val metadataConfig = HoodieMetadataConfig.newBuilder().enable(true).build()
       // NativeTableMetadataFactory routes through the metadata table when
-      // enabled and falls back to filesystem listing otherwise.
+      // enabled and falls back to filesystem listing otherwise. We always read
+      // the partition list so downstream code sees the true source-table
+      // partition count, even when size sampling is disabled.
       val tableMetadata = NativeTableMetadataFactory.getInstance().create(
         engineCtx, metaClient.getStorage, metadataConfig, metaClient.getBasePath.toString)
       val allPartitions = tableMetadata.getAllPartitionPaths.asScala.toList
@@ -481,6 +479,12 @@ object WorkloadSynthesizer {
       }
 
       val sortedPartitions = allPartitions.sorted
+
+      if (config.partitionSizeSample <= 0) {
+        notes += s"source total partitions: ${sortedPartitions.size}; size sampling disabled (--partition-size-sample <= 0)"
+        return (PartitionSizeStats(sortedPartitions.size, Nil, 0L), notes.toSeq)
+      }
+
       val sampled = sortedPartitions.takeRight(config.partitionSizeSample)
       notes += s"source total partitions: ${sortedPartitions.size}; " +
         s"sampling latest ${sampled.size} for size (config: ${config.partitionSizeSample})"
