@@ -187,4 +187,66 @@ class BucketRunSpec extends AnyFunSuite {
     // records=1100. Records delta = 100% → split.
     assert(runs.size == 2)
   }
+
+  ///////////////////////
+  // Drift detection: anchor + end-to-end sanity check
+  ///////////////////////
+
+  test("gradual update-ratio drift breaks the run when anchor-delta exceeds 2x threshold") {
+    // 30 commits, update-ratio drifts from 0.10 → 0.40 (step ~= 0.01 per commit).
+    // Running-mean check absorbs (each step tiny vs mean), but anchor delta
+    // eventually exceeds 2x threshold (0.20) and breaks the run.
+    val commits = (0 until 30).map { i =>
+      val ratio = 0.10 + 0.01 * i
+      val ins = ((1.0 - ratio) * 1000).toLong
+      val upd = (ratio * 1000).toLong
+      shape(ins, upd, 1.0, 3)
+    }
+    val runs = BucketRun.detectRuns(commits)
+    assert(runs.size >= 2,
+      s"expected drift to break the run (>=2 runs), got ${runs.size}: $runs")
+  }
+
+  test("stable workload with sub-threshold noise stays a single run despite anchor check") {
+    // Update-ratio 0.30 ± 0.02 random noise. Neither running-mean nor anchor
+    // deltas cross threshold, and end-to-end drift stays under 1x too.
+    val rand = new scala.util.Random(seed = 42)
+    val commits = (0 until 30).map { _ =>
+      val noise = (rand.nextDouble() - 0.5) * 0.04 // ±0.02
+      val ratio = math.max(0.0, math.min(1.0, 0.30 + noise))
+      val ins = ((1.0 - ratio) * 1000).toLong
+      val upd = (ratio * 1000).toLong
+      shape(ins, upd, 1.0, 3)
+    }
+    val runs = BucketRun.detectRuns(commits)
+    assert(runs.size == 1,
+      s"expected 1 run for noisy-but-stable workload, got ${runs.size}: $runs")
+  }
+
+  test("end-to-end sanity check splits when 1 run drifts more than 1x threshold end-to-end") {
+    // 6 commits, update-ratio drifts 0.20 → 0.31 (~0.022 per step). Each step
+    // and each anchor delta stay under threshold, so the primary walk keeps
+    // one run. End-to-end delta = 0.11 > 0.1 threshold → sanity-check splits
+    // at midpoint into two 3-commit halves.
+    val commits = (0 until 6).map { i =>
+      val ratio = 0.20 + 0.022 * i
+      val ins = ((1.0 - ratio) * 1000).toLong
+      val upd = (ratio * 1000).toLong
+      shape(ins, upd, 1.0, 3)
+    }
+    val runs = BucketRun.detectRuns(commits)
+    assert(runs.size == 2,
+      s"expected end-to-end sanity check to split (2 runs), got ${runs.size}: $runs")
+    assert(runs.head.size == 3)
+    assert(runs(1).size == 3)
+    // Second half's mean ratio should be higher than the first's.
+    assert(runs(1).meanUpdateRatio > runs.head.meanUpdateRatio)
+  }
+
+  test("end-to-end sanity check leaves stable workload as one run") {
+    // Truly flat workload: no drift end-to-end.
+    val commits = (0 until 8).map(_ => shape(1000, 100, 1.0, 3))
+    val runs = BucketRun.detectRuns(commits)
+    assert(runs.size == 1)
+  }
 }
