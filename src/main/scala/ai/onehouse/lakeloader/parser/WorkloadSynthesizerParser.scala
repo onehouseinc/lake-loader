@@ -60,6 +60,12 @@ object WorkloadSynthesizerParser {
         .text("Fallback: if fewer than 3 base files are available for footer sampling, read up to this " +
           "many actual record-key values from one file for classification. Default: 500")
 
+      opt[Int]("partition-size-sample")
+        .action((x, c) => c.copy(partitionSizeSample = x))
+        .text("Number of latest partitions (lex sort — matches datestr schemes) to sample when " +
+          "computing meanPartitionSizeBytes and perPartitionSizesBytes. Sums latest base file sizes " +
+          "per partition via Hudi's FileSystemView. Set to 0 to disable. Default: 30.")
+
       opt[String]("primary-key-type")
         .action((x, c) => c.copy(primaryKeyTypeOverride = Some(keyTypeRead.reads(x))))
         .text("Skip primary-key inference and use this value instead (Random | TemporallyOrdered)")

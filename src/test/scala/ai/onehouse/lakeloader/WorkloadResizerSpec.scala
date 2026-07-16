@@ -49,6 +49,8 @@ class WorkloadResizerSpec extends AnyFunSuite {
       recordKeyField = Some("id"),
       schemaChoice = InferredColumnCount(10),
       commitStats = Nil,
+      meanPartitionSizeBytes = 0L,
+      perPartitionSizesBytes = Nil,
       auditNotes = Seq("test note"))
 
   test("applyScale with factor=1.0 and no partition change is a no-op") {
@@ -167,6 +169,8 @@ class WorkloadResizerSpec extends AnyFunSuite {
     assert(parsed.updatePattern == src.updatePattern)
     assert(math.abs(parsed.zipfShape - src.zipfShape) < 1e-9)
     assert(math.abs(parsed.minZipfShapeToEmit - src.minZipfShapeToEmit) < 1e-9)
+    assert(parsed.meanPartitionSizeBytes == src.meanPartitionSizeBytes)
+    assert(parsed.perPartitionSizesBytes == src.perPartitionSizesBytes)
     assert(parsed.keyType == src.keyType)
     parsed.partitionDistribution.zip(src.partitionDistribution).foreach { case (a, b) =>
       assert(math.abs(a - b) < 1e-9)
@@ -179,6 +183,46 @@ class WorkloadResizerSpec extends AnyFunSuite {
     val json = WorkloadSynthesizer.renderDerivedJson(src, "/dummy/path")
     val parsed = WorkloadResizer.parseSynthDerivedJson(json)
     assert(parsed.schemaChoice == SuppliedSchema("/customer/schema.avsc"))
+  }
+
+  test("parseSynthDerivedJson round-trips populated partition-size fields") {
+    val src = sample().copy(
+      meanPartitionSizeBytes = 1234567L,
+      perPartitionSizesBytes = List(1000L, 2000L, 3000L, 4000L))
+    val json = WorkloadSynthesizer.renderDerivedJson(src, "/dummy/path")
+    val parsed = WorkloadResizer.parseSynthDerivedJson(json)
+    assert(parsed.meanPartitionSizeBytes == 1234567L)
+    assert(parsed.perPartitionSizesBytes == List(1000L, 2000L, 3000L, 4000L))
+  }
+
+  test("parseSynthDerivedJson tolerates missing partition-size fields (old JSON)") {
+    // Build a synth-derived.json without meanPartitionSizeBytes / perPartitionSizesBytes.
+    // parseSynthDerivedJson should default to 0 / Nil rather than crashing.
+    val minimalJson =
+      """{
+        |  "sourceTablePath": "/dummy",
+        |  "numRounds": 1,
+        |  "recordsPerRound": [100],
+        |  "medianRecordsPerRound": 100,
+        |  "totalPartitions": 5,
+        |  "updateRatio": 0.1,
+        |  "numPartitionsToUpdate": 2,
+        |  "recordSize": 512,
+        |  "targetDataFileSize": 134217728,
+        |  "updatePattern": "Uniform",
+        |  "zipfShape": 0.0,
+        |  "minZipfShapeToEmit": 0.3,
+        |  "partitionDistribution": [0.5, 0.5],
+        |  "round0PartitionDistribution": null,
+        |  "keyType": "Random",
+        |  "keyTypeSource": "test",
+        |  "recordKeyField": "id",
+        |  "schemaChoice": {"kind":"InferredColumnCount","numColumns":10},
+        |  "commitStats": []
+        |}""".stripMargin
+    val parsed = WorkloadResizer.parseSynthDerivedJson(minimalJson)
+    assert(parsed.meanPartitionSizeBytes == 0L)
+    assert(parsed.perPartitionSizesBytes == Nil)
   }
 
   test("parseSynthDerivedJson handles round0PartitionDistribution=null") {

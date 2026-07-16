@@ -24,6 +24,7 @@ import scala.collection.JavaConverters._
 class WorkloadSynthesizerSpec extends AnyFunSuite {
 
   private val defaultSchema = InferredColumnCount(10)
+  private val emptyPartitionSize = WorkloadSynthesizer.PartitionSizeStats(0, Nil, 0L)
 
   private def commit(
       instant: String,
@@ -56,7 +57,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
       commit("t2", inserts = Map("a" -> 900L), updates = Map("a" -> 400L, "b" -> 100L)))
 
     val d = WorkloadSynthesizer.deriveConfig(
-      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, Seq.empty)
+      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, emptyPartitionSize, Seq.empty)
 
     assert(d.numRounds == 3)
     assert(d.recordsPerRound == List(1500L, 1300L, 1400L))
@@ -76,7 +77,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
     }.toMap
     val commits = List(commit("t0", inserts = perPartition), commit("t1", inserts = perPartition))
     val d = WorkloadSynthesizer.deriveConfig(
-      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, Seq.empty)
+      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, emptyPartitionSize, Seq.empty)
 
     assert(d.updatePattern == UpdatePatterns.Zipf, s"got ${d.updatePattern}")
     assert(math.abs(d.zipfShape - 2.0) < 0.15, s"got ${d.zipfShape}")
@@ -87,7 +88,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
     val perPartition = (1 to 10).map(r => s"p$r" -> 1000L).toMap
     val commits = List(commit("t0", inserts = perPartition), commit("t1", inserts = perPartition))
     val d = WorkloadSynthesizer.deriveConfig(
-      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, Seq.empty)
+      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, emptyPartitionSize, Seq.empty)
 
     assert(d.updatePattern == UpdatePatterns.Uniform)
     assert(d.zipfShape == 0.0)
@@ -102,7 +103,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
       commit("t1", inserts = laterRounds),
       commit("t2", inserts = laterRounds))
     val d = WorkloadSynthesizer.deriveConfig(
-      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, Seq.empty)
+      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, emptyPartitionSize, Seq.empty)
 
     assert(d.round0PartitionDistribution.isDefined)
   }
@@ -112,7 +113,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
       commit("t0", inserts = Map("a" -> 1000L, "b" -> 500L)),
       commit("t1", inserts = Map("a" -> 800L), updates = Map("a" -> 200L)))
     val d = WorkloadSynthesizer.deriveConfig(
-      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, Seq.empty)
+      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, emptyPartitionSize, Seq.empty)
 
     val out = WorkloadSynthesizer.renderFullFlags(d)
 
@@ -134,7 +135,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
   test("renderSummaryFlags collapses per-round counts to median") {
     val commits = (1 to 5).map(i => commit(s"t$i", inserts = Map("a" -> (i * 1000L)))).toList
     val d = WorkloadSynthesizer.deriveConfig(
-      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, Seq.empty)
+      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, emptyPartitionSize, Seq.empty)
 
     val out = WorkloadSynthesizer.renderSummaryFlags(d)
     assert(out.contains("--number-records-per-round 3000"), s"expected median=3000 in:\n$out")
@@ -145,7 +146,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
     val flat = (1 to 5).map(r => s"p$r" -> 1000L).toMap
     val flatCommits = List(commit("t0", inserts = flat), commit("t1", inserts = flat))
     val dFlat = WorkloadSynthesizer.deriveConfig(
-      flatCommits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, Seq.empty)
+      flatCommits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, emptyPartitionSize, Seq.empty)
     val outFlat = WorkloadSynthesizer.renderFullFlags(dFlat)
     assert(!outFlat.contains("--zipfian-shape"), s"unexpected zipf flag on uniform:\n$outFlat")
 
@@ -154,7 +155,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
     }.toMap
     val skewedCommits = List(commit("t0", inserts = skewed), commit("t1", inserts = skewed))
     val dSkewed = WorkloadSynthesizer.deriveConfig(
-      skewedCommits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, Seq.empty)
+      skewedCommits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, emptyPartitionSize, Seq.empty)
     val outSkewed = WorkloadSynthesizer.renderFullFlags(dSkewed)
     assert(outSkewed.contains("--zipfian-shape"), s"missing zipf flag on skewed:\n$outSkewed")
   }
@@ -167,7 +168,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
       commit("t1", inserts = laterRounds),
       commit("t2", inserts = laterRounds))
     val d = WorkloadSynthesizer.deriveConfig(
-      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, Seq.empty)
+      commits, defaultConfig, KeyTypes.Random, "test", Some("key"), defaultSchema, emptyPartitionSize, Seq.empty)
 
     val out = WorkloadSynthesizer.renderFullFlags(d)
     val partLine = out.split("\n").find(_.startsWith("--partition-distribution")).getOrElse("")
@@ -177,7 +178,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
   test("renderAudit contains derived values and notes") {
     val commits = List(commit("t0", inserts = Map("a" -> 100L)))
     val d = WorkloadSynthesizer.deriveConfig(
-      commits, defaultConfig, KeyTypes.Random, "cli-override", Some("id"), defaultSchema, Seq("note-one"))
+      commits, defaultConfig, KeyTypes.Random, "cli-override", Some("id"), defaultSchema, emptyPartitionSize, Seq("note-one"))
     val audit = WorkloadSynthesizer.renderAudit(d, "s3://bucket/table")
     assert(audit.contains("source table: s3://bucket/table"))
     assert(audit.contains("key type source: cli-override"))
@@ -190,7 +191,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
     val commits = List(commit("t0", inserts = Map("a" -> 100L)))
     val d = WorkloadSynthesizer.deriveConfig(
       commits, defaultConfig, KeyTypes.Random, "test", Some("id"),
-      InferredColumnCount(17), Seq.empty)
+      InferredColumnCount(17), emptyPartitionSize, Seq.empty)
     val out = WorkloadSynthesizer.renderFullFlags(d)
     assert(out.contains("--number-columns 17"), s"expected --number-columns 17 in:\n$out")
     assert(!out.contains("--avro-schema"), s"should not emit --avro-schema for InferredColumnCount:\n$out")
@@ -200,7 +201,7 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
     val commits = List(commit("t0", inserts = Map("a" -> 100L)))
     val d = WorkloadSynthesizer.deriveConfig(
       commits, defaultConfig, KeyTypes.Random, "test", Some("id"),
-      SuppliedSchema("/path/to/schema.avsc"), Seq.empty)
+      SuppliedSchema("/path/to/schema.avsc"), emptyPartitionSize, Seq.empty)
     val out = WorkloadSynthesizer.renderFullFlags(d)
     assert(out.contains("--avro-schema /path/to/schema.avsc"),
       s"expected --avro-schema in:\n$out")

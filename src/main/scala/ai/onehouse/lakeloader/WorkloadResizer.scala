@@ -374,6 +374,9 @@ object WorkloadResizer {
       recordKeyField = stringVal("recordKeyField"),
       schemaChoice = schemaChoice,
       commitStats = commitStats,
+      // Missing on pre-#54 review synth-derived.json → treat as unknown / empty.
+      meanPartitionSizeBytes = numVal("meanPartitionSizeBytes").map(_.toLong).getOrElse(0L),
+      perPartitionSizesBytes = listVal("perPartitionSizesBytes").map(parseLongList).getOrElse(Nil),
       auditNotes = Seq(s"source: ${stringVal("sourceTablePath").getOrElse("<unknown>")}"))
   }
 }

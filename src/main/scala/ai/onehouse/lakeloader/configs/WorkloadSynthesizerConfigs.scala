@@ -27,4 +27,9 @@ case class SynthesizerConfig(
     minZipfShapeToEmit: Double = 0.3,
     primaryKeyTypeOverride: Option[KeyType] = None,
     keySampleFiles: Int = 100,
-    keySampleSize: Int = 500)
+    keySampleSize: Int = 500,
+    // Number of most-recent partitions (lex sort — matches datestr schemes) whose
+    // total on-disk size is sampled to estimate meanPartitionSizeBytes. Set to 0
+    // to disable. Default 30. Older partitions beyond this range are assumed to
+    // follow the same distribution.
+    partitionSizeSample: Int = 30)

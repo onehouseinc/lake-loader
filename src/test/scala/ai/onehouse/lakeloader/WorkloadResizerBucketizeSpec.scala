@@ -59,6 +59,8 @@ class WorkloadResizerBucketizeSpec extends AnyFunSuite {
       recordKeyField = Some("id"),
       schemaChoice = InferredColumnCount(10),
       commitStats = stats,
+      meanPartitionSizeBytes = 0L,
+      perPartitionSizesBytes = Nil,
       auditNotes = Seq("test"))
   }
 

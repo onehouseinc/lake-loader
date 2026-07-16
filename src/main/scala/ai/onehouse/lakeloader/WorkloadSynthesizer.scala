@@ -72,6 +72,23 @@ object WorkloadSynthesizer {
       insertZipfShape: Double)
 
   /**
+   * Result of walking the source table's partition set via
+   * HoodieTableMetadata / FileSystemView.
+   *
+   * @param sourceTotalPartitions the true partition count in the source table
+   *                              (from getAllPartitionPaths — reflects fact/dim
+   *                              full fanout regardless of which partitions the
+   *                              analyzed commit window happened to touch)
+   * @param sampledPartitionSizes the total on-disk bytes for the latest N
+   *                              partitions in sort order, in that same order
+   * @param meanBytes             arithmetic mean of sampledPartitionSizes
+   */
+  private[lakeloader] case class PartitionSizeStats(
+      sourceTotalPartitions: Int,
+      sampledPartitionSizes: List[Long],
+      meanBytes: Long)
+
+  /**
    * How the emitted flag file should describe the schema shape.
    *
    *  - `SuppliedSchema(path)`: customer handed off an .avsc; emit --avro-schema
@@ -107,6 +124,13 @@ object WorkloadSynthesizer {
       recordKeyField: Option[String],
       schemaChoice: SchemaChoice,
       commitStats: List[CommitStat],
+      // On-disk size sampled from the latest N partitions (see
+      // --partition-size-sample). meanPartitionSizeBytes = arithmetic mean of the
+      // sampled per-partition totals; perPartitionSizesBytes = the raw list, in
+      // sort order (typically datestr chronological). Empty when sampling is
+      // disabled or the table has no partitions.
+      meanPartitionSizeBytes: Long,
+      perPartitionSizesBytes: List[Long],
       auditNotes: Seq[String],
       // When defined, the flag renderer emits comma-separated per-round lists for
       // these four params instead of the scalar `updateRatio` / `updatePattern` /
@@ -152,8 +176,11 @@ object WorkloadSynthesizer {
 
     val (schemaChoice, schemaNotes) = resolveSchemaChoice(metaClient, config)
 
+    val (partitionSize, partitionSizeNotes) = resolvePartitionSizes(metaClient, storageConf, config)
+
     val derived = deriveConfig(
-      commits, config, keyType, keyTypeSource, recordKeyField, schemaChoice, keyTypeNotes ++ schemaNotes)
+      commits, config, keyType, keyTypeSource, recordKeyField, schemaChoice, partitionSize,
+      keyTypeNotes ++ schemaNotes ++ partitionSizeNotes)
 
     writeOutputs(hadoopConf, config.outputDir, derived, config.tablePath)
     println(s"[WorkloadSynthesizer] Wrote synth-full.flags, synth-summary.flags, and synth-audit.txt to ${config.outputDir}")
@@ -265,15 +292,22 @@ object WorkloadSynthesizer {
       keyTypeSource: String,
       recordKeyField: Option[String],
       schemaChoice: SchemaChoice,
+      partitionSize: PartitionSizeStats,
       auditNotesPrefix: Seq[String] = Nil): DerivedConfig = {
 
     val recordsPerRound = commits.map(c => c.inserts + c.updates)
     val numRounds = commits.size
     val medianRecordsPerRound = TimelineStats.medianLong(recordsPerRound)
 
-    val allPartitions = commits.flatMap(_.partitionInserts.keys).toSet ++
+    val observedPartitions = commits.flatMap(_.partitionInserts.keys).toSet ++
       commits.flatMap(_.partitionUpdates.keys).toSet
-    val totalPartitions = allPartitions.size
+    // Prefer the true source partition count from HoodieTableMetadata; fall back
+    // to the commit-observed set if the metadata pass returned 0 (e.g. an
+    // unpartitioned or empty table). This avoids the FACT-table undercount
+    // where recent commits touch only a slice of the total partition set.
+    val totalPartitions =
+      if (partitionSize.sourceTotalPartitions > 0) partitionSize.sourceTotalPartitions
+      else observedPartitions.size
 
     val updateRatio = TimelineStats.deriveUpdateRatio(commits.map(c => (c.inserts, c.updates)))
 
@@ -350,7 +384,8 @@ object WorkloadSynthesizer {
       s"commits considered: ${commits.size}",
       s"total records (inserts + updates): $totalRecords",
       s"total compressed bytes written: $totalBytes",
-      s"partitions ever written: $totalPartitions",
+      s"total partitions (source table): $totalPartitions " +
+        s"(observed in analyzed commits: ${observedPartitions.size})",
       s"fitted zipf shapes (per commit, inserts): ${insertShapes.map(s => f"$s%.3f").mkString(", ")}",
       s"fitted zipf shapes (per commit, updates): ${updateShapes.map(s => f"$s%.3f").mkString(", ")}",
       s"round-0 differs from tail: ${round0Distribution.isDefined}")
@@ -374,6 +409,8 @@ object WorkloadSynthesizer {
       recordKeyField = recordKeyField,
       schemaChoice = schemaChoice,
       commitStats = commitStats,
+      meanPartitionSizeBytes = partitionSize.meanBytes,
+      perPartitionSizesBytes = partitionSize.sampledPartitionSizes,
       auditNotes = auditNotes)
   }
 
@@ -390,6 +427,82 @@ object WorkloadSynthesizer {
   private def roundTo(x: Double, decimals: Int): Double = {
     val f = math.pow(10, decimals)
     math.round(x * f) / f
+  }
+
+  ///////////////////////
+  // Partition size sampling
+  ///////////////////////
+
+  /**
+   * Compute the true source-table partition count and sample on-disk sizes for
+   * the latest N partitions (N = --partition-size-sample; default 30).
+   *
+   *   - Partitions listed via HoodieTableMetadata.getAllPartitionPaths, which
+   *     uses the metadata table when enabled and falls back to filesystem
+   *     listing otherwise.
+   *   - Sorted lexicographically — matches datestr-partitioned schemes so
+   *     "latest 30" is chronological. For custom schemes the "latest 30 in
+   *     sort order" heuristic still gives a stable slice.
+   *   - Per-partition size = sum of latest base file sizes from
+   *     HoodieTableFileSystemView.getLatestBaseFiles(partition). Log files
+   *     (MoR delta commits) are intentionally excluded — they reflect
+   *     churn, not steady-state footprint.
+   *
+   * Failures are downgraded to empty results with an audit note; the caller
+   * falls back to commit-observed partitions in that case.
+   */
+  private[lakeloader] def resolvePartitionSizes(
+      metaClient: HoodieTableMetaClient,
+      storageConf: org.apache.hudi.storage.StorageConfiguration[_],
+      config: SynthesizerConfig): (PartitionSizeStats, Seq[String]) = {
+    import org.apache.hudi.common.config.HoodieMetadataConfig
+    import org.apache.hudi.common.engine.HoodieLocalEngineContext
+    import org.apache.hudi.common.table.view.FileSystemViewManager
+    import org.apache.hudi.metadata.NativeTableMetadataFactory
+
+    val notes = scala.collection.mutable.ArrayBuffer[String]()
+    if (config.partitionSizeSample <= 0) {
+      notes += "partition-size sampling disabled (--partition-size-sample <= 0)"
+      return (PartitionSizeStats(0, Nil, 0L), notes.toSeq)
+    }
+
+    try {
+      val engineCtx = new HoodieLocalEngineContext(storageConf)
+      val metadataConfig = HoodieMetadataConfig.newBuilder().enable(true).build()
+      // NativeTableMetadataFactory routes through the metadata table when
+      // enabled and falls back to filesystem listing otherwise.
+      val tableMetadata = NativeTableMetadataFactory.getInstance().create(
+        engineCtx, metaClient.getStorage, metadataConfig, metaClient.getBasePath.toString)
+      val allPartitions = tableMetadata.getAllPartitionPaths.asScala.toList
+
+      if (allPartitions.isEmpty) {
+        notes += "source table has no partitions listed via HoodieTableMetadata (unpartitioned?)"
+        return (PartitionSizeStats(0, Nil, 0L), notes.toSeq)
+      }
+
+      val sortedPartitions = allPartitions.sorted
+      val sampled = sortedPartitions.takeRight(config.partitionSizeSample)
+      notes += s"source total partitions: ${sortedPartitions.size}; " +
+        s"sampling latest ${sampled.size} for size (config: ${config.partitionSizeSample})"
+
+      val fsView = FileSystemViewManager.createInMemoryFileSystemView(
+        engineCtx, metaClient, metadataConfig)
+      try {
+        val sizes = sampled.map { partition =>
+          fsView.getLatestBaseFiles(partition).iterator().asScala.map(_.getFileSize).sum
+        }
+        val mean = if (sizes.isEmpty) 0L else sizes.sum / sizes.size
+        notes += f"mean partition size across sampled: ${mean}%d bytes"
+        notes += s"per-partition sizes (bytes, sort order): ${sizes.mkString(",")}"
+        (PartitionSizeStats(sortedPartitions.size, sizes, mean), notes.toSeq)
+      } finally {
+        fsView.close()
+      }
+    } catch {
+      case e: Exception =>
+        notes += s"partition-size sampling failed: ${e.getClass.getSimpleName}: ${e.getMessage}"
+        (PartitionSizeStats(0, Nil, 0L), notes.toSeq)
+    }
   }
 
   ///////////////////////
@@ -935,6 +1048,8 @@ object WorkloadSynthesizer {
     sb.append(s"""  "keyType": ${q(d.keyType.toString)},""").append("\n")
     sb.append(s"""  "keyTypeSource": ${q(d.keyTypeSource)},""").append("\n")
     sb.append(s"""  "recordKeyField": ${d.recordKeyField.map(q).getOrElse("null")},""").append("\n")
+    sb.append(s"""  "meanPartitionSizeBytes": ${d.meanPartitionSizeBytes},""").append("\n")
+    sb.append(s"""  "perPartitionSizesBytes": ${jsonList(d.perPartitionSizesBytes, (x: Long) => x.toString)},""").append("\n")
     sb.append(s"""  "schemaChoice": $schemaJson,""").append("\n")
     sb.append(s"""  "commitStats": ${renderCommitStats(d.commitStats)}""").append("\n")
     sb.append("}\n")
@@ -1048,6 +1163,8 @@ object WorkloadSynthesizer {
       s"  zipfShape=${d.zipfShape}",
       s"  keyType=${d.keyType}",
       s"  medianRecordsPerRound=${d.medianRecordsPerRound}",
+      s"  meanPartitionSizeBytes=${d.meanPartitionSizeBytes} " +
+        s"(sampled ${d.perPartitionSizesBytes.size} partitions)",
       s"  schemaChoice=${d.schemaChoice match {
         case SuppliedSchema(p) => s"SuppliedSchema($p)"
         case InferredColumnCount(n) => s"InferredColumnCount(numColumns=$n)"
