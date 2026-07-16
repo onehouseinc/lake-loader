@@ -107,21 +107,69 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
    * @param updatePatterns                 Update pattern for generating updates: random (uniform) or zipf (skewed).
    * @param numPartitionsToUpdate          Number of partitions to update (default -1/ none)
    */
+  /**
+   * Deprecated scalar-parameter overload preserved for external Scala callers
+   * that used the pre-per-round-list signature. Each scalar broadcasts to a
+   * single-element List and delegates to the new list-based method.
+   *
+   * Note: named-argument callers cannot use this overload — Scala's overload
+   * resolution requires positional-or-fully-named calls for overloaded methods
+   * with default arguments. Positional calls work fine.
+   */
+  @deprecated(
+    "Use the list-based signature (updateRatios, updatePatterns, " +
+      "numPartitionsToUpdate as List[Int], zipfianShapes). This overload " +
+      "forwards each scalar as a single-element list.",
+    "0.3")
+  def generateWorkload(
+      path: String,
+      roundsDistribution: List[Long],
+      numColumns: Int,
+      recordSize: Int,
+      updateRatio: Double,
+      totalPartitions: Int,
+      partitionDistributionMatrixOpt: Option[List[List[Double]]],
+      targetDataFileSize: Int,
+      skipIfExists: Boolean,
+      keyType: KeyType,
+      startRound: Int,
+      updatePattern: UpdatePatterns,
+      numPartitionsToUpdate: Int,
+      zipfianShape: Double,
+      avroSchemaPath: Option[String]): Unit = {
+    generateWorkload(
+      path = path,
+      roundsDistribution = roundsDistribution,
+      numColumns = numColumns,
+      recordSize = recordSize,
+      updateRatios = List(updateRatio),
+      totalPartitions = totalPartitions,
+      partitionDistributionMatrixOpt = partitionDistributionMatrixOpt,
+      targetDataFileSize = targetDataFileSize,
+      skipIfExists = skipIfExists,
+      keyType = keyType,
+      startRound = startRound,
+      updatePatterns = List(updatePattern),
+      numPartitionsToUpdate = List(numPartitionsToUpdate),
+      zipfianShapes = List(zipfianShape),
+      avroSchemaPath = avroSchemaPath)
+  }
+
   def generateWorkload(
       path: String,
       roundsDistribution: List[Long] = List.fill(numRounds)(1000000L),
       numColumns: Int = 10,
       recordSize: Int = 1024,
-      updateRatio: Double = 0.5f,
+      updateRatios: List[Double] = List(0.5),
       totalPartitions: Int = -1,
       partitionDistributionMatrixOpt: Option[List[List[Double]]] = None,
       targetDataFileSize: Int = 128 * 1024 * 1024,
       skipIfExists: Boolean = false,
       keyType: KeyType = KeyTypes.Random,
       startRound: Int = 0,
-      updatePatterns: UpdatePatterns = UpdatePatterns.Uniform,
-      numPartitionsToUpdate: Int = -1,
-      zipfianShape: Double = 2.93,
+      updatePatterns: List[UpdatePatterns] = List(UpdatePatterns.Uniform),
+      numPartitionsToUpdate: List[Int] = List(-1),
+      zipfianShapes: List[Double] = List(2.93),
       avroSchemaPath: Option[String] = None): Unit = {
     require(path.nonEmpty, "Path cannot be empty")
     require(
@@ -132,9 +180,15 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
         numColumns >= 5,
         "The number of columns needs to be at least 5 since we need at least 4 cols for key, partition, round, and timestamp.")
     }
+    require(updateRatios.nonEmpty, "updateRatios must not be empty")
+    require(updatePatterns.nonEmpty, "updatePatterns must not be empty")
+    require(numPartitionsToUpdate.nonEmpty, "numPartitionsToUpdate must not be empty")
+    require(zipfianShapes.nonEmpty, "zipfianShapes must not be empty")
+    // `-1` is the documented sentinel for "no partition-count constraint";
+    // any non-negative value must not exceed totalPartitions.
     require(
-      numPartitionsToUpdate <= totalPartitions,
-      "The number of partitions to update should be lower than the total partitions")
+      numPartitionsToUpdate.forall(n => n == -1 || n <= totalPartitions),
+      s"Each numPartitionsToUpdate entry must be -1 (unbounded) or <= totalPartitions=$totalPartitions; got $numPartitionsToUpdate")
 
     // Compute records distribution matrix across partitions; such matrix
     // could be explicitly provided as an optional parameter prescribing corresponding
@@ -191,11 +245,17 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
           .exists(targetLocationPath) && fs.listFiles(targetLocationPath, false).hasNext) {
         println(s"Skipping generation for round # $curRound, location $targetLocation is not empty")
       } else {
+        // Per-round parameter lookup — last-value-fill semantics so a scalar can broadcast.
+        val roundUpdateRatio = ChangeDataGenerator.valueForRound(updateRatios, curRound)
+        val roundUpdatePattern = ChangeDataGenerator.valueForRound(updatePatterns, curRound)
+        val roundNumPartitionsToUpdate = ChangeDataGenerator.valueForRound(numPartitionsToUpdate, curRound)
+        val roundZipfianShape = ChangeDataGenerator.valueForRound(zipfianShapes, curRound)
+
         // Calculate inserts/updates split
         val targetRecords = roundsDistribution(curRound)
         val numUpdates =
-          if (curRound == 0 || numPartitionsToUpdate <= 0) 0
-          else Math.min((updateRatio * targetRecords).toLong, curRound * targetRecords)
+          if (curRound == 0 || roundNumPartitionsToUpdate <= 0) 0
+          else Math.min((roundUpdateRatio * targetRecords).toLong, curRound * targetRecords)
         val numInserts = targetRecords - numUpdates
 
         // Use ceiling so the per-file size never exceeds targetDataFileSize. With floor,
@@ -233,14 +293,14 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
           else
             insertsDF.union(
               generateUpdates(
-                updatePatterns,
+                roundUpdatePattern,
                 partitionPaths,
                 numUpdates,
-                numPartitionsToUpdate,
+                roundNumPartitionsToUpdate,
                 path,
                 targetParallelism,
                 curRound,
-                zipfianShape))
+                roundZipfianShape))
 
         spark.time {
           upsertDF
@@ -506,6 +566,29 @@ object ChangeDataGenerator {
   val DEFAULT_DATA_GEN_FORMAT: String = "parquet"
 
   /**
+   * Look up the per-round value in `list`. Uses last-value-fill: if `round` is
+   * beyond the list length, returns `list.last`. A scalar (single-entry list)
+   * broadcasts to every round; a shorter list holds its final value for the
+   * remaining rounds; a longer list is truncated by the caller before this
+   * helper is invoked. Callers must ensure `list` is non-empty.
+   */
+  private[lakeloader] def valueForRound[T](list: List[T], round: Int): T = {
+    require(list.nonEmpty, "value list must not be empty")
+    if (round < list.size) list(round) else list.last
+  }
+
+  /**
+   * Right-pad `list` to exactly `n` entries by repeating its last value; if
+   * `list` already has more than `n` entries, truncate to `n`. Mirrors the
+   * existing behavior for `--number-records-per-round`.
+   */
+  private[lakeloader] def padOrTruncate[T](list: List[T], n: Int): List[T] = {
+    require(list.nonEmpty, "list must not be empty")
+    if (list.size >= n) list.take(n)
+    else list ++ List.fill(n - list.size)(list.last)
+  }
+
+  /**
    * Validate and expand `partitionDistributionMatrixOpt` into the matrix consumed by the
    * generator. When the option is `None`, falls back to a uniform `1.0 / totalPartitions` row
    * replicated for every round.
@@ -582,23 +665,19 @@ object ChangeDataGenerator {
         val changeDataGenerator = new ChangeDataGenerator(spark, config.numberOfRounds)
         changeDataGenerator.generateWorkload(
           config.outputPath,
-          roundsDistribution = {
-            val dist = config.roundsDistribution
-            if (dist.size >= config.numberOfRounds) dist.take(config.numberOfRounds)
-            else dist ++ List.fill(config.numberOfRounds - dist.size)(dist.last)
-          },
+          roundsDistribution = padOrTruncate(config.roundsDistribution, config.numberOfRounds),
           numColumns = config.numberColumns,
           recordSize = config.recordSize,
-          updateRatio = config.updateRatio,
+          updateRatios = padOrTruncate(config.updateRatios, config.numberOfRounds),
           totalPartitions = config.totalPartitions,
           partitionDistributionMatrixOpt = partitionDistributionMatrixOpt,
           targetDataFileSize = config.targetDataFileSize,
           skipIfExists = config.skipIfExists,
           keyType = config.keyType,
           startRound = config.startRound,
-          updatePatterns = config.updatePattern,
-          numPartitionsToUpdate = config.numPartitionsToUpdate,
-          zipfianShape = config.zipfianShape,
+          updatePatterns = padOrTruncate(config.updatePatterns, config.numberOfRounds),
+          numPartitionsToUpdate = padOrTruncate(config.numPartitionsToUpdate, config.numberOfRounds),
+          zipfianShapes = padOrTruncate(config.zipfianShapes, config.numberOfRounds),
           avroSchemaPath = config.avroSchemaPath)
 
         spark.stop()
