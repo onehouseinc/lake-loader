@@ -2,11 +2,15 @@
 
 Lake loader is a tool to benchmark incremental load (writes) to data lakes and warehouses. The tool generates input datasets with configurations to cover different aspects of load patterns - number of records, number of partitions, record size, update to insert ratio, distribution of inserts & updates across partitions and total number of rounds of incremental loads to perform. 
 
-The tool consists of two main components:
+The tool consists of four main components:
 
 **Change data generator** This component takes a specified L pattern and generates rounds of inputs. Each input round has change records, which can be either an insert or an update to an insert in a prior input round.
 
 **Incremental Loader** The loader component implements best practices for loading data into various open table formats using popular cloud data platforms like AWS EMR, Databricks and Snowflake. Round 0 is specially designed to perform a one-time bulk load using the preferred bulk loading methods for the data platform. Round 1 and above simply perform incremental loads using pre-generated input change records from each round.
+
+**Workload Synthesizer** Points at an existing Hudi table, walks its timeline, and emits a `ChangeDataGenerator` configuration that mimics the observed production workload shape (records per round, update ratio, per-partition insert skew, zipf shape, primary-key type). Lets customers hand off a small config artifact instead of raw data. See [docs/workload-synthesizer.md](docs/workload-synthesizer.md) for motivation and design.
+
+**Workload Resizer** Consumes the machine-readable output of the Synthesizer (`synth-derived.json`) and applies a scale factor and/or a target partition count to produce a benchmark-sized configuration. Preserves the shape of the workload (update ratio, zipf skew, key type, record size) while scaling data volume and partition fanout independently. Runs as a plain JVM CLI — no Spark needed.
 
 ![Figure: Shows the Lake Loader tool's high-level functioning to benchmark incremental loads across popular cloud data platforms.
 ](src/main/resources/images/lakeLoaderArch.png)
@@ -50,16 +54,16 @@ def generateWorkload(
   roundsDistribution: List[Long],
   numColumns: Int = 10,
   recordSize: Int = 1024,
-  updateRatio: Float = 0.5f,
+  updateRatios: List[Double] = List(0.5),
   totalPartitions: Int = -1,
   partitionDistributionMatrixOpt: Option[List[List[Double]]] = None,
   datagenFileSize: Int = 128 * 1024 * 1024,
   skipIfExists: Boolean = false,
   startRound: Int = 0,
   primaryKeyType: KeyType = KeyType.Random,
-  updatePatterns: UpdatePatterns = UpdatePatterns.Uniform,
-  numPartitionsToUpdate: Int = -1,
-  zipfianShape: Double = 2.93
+  updatePatterns: List[UpdatePatterns] = List(UpdatePatterns.Uniform),
+  numPartitionsToUpdate: List[Int] = List(-1),
+  zipfianShapes: List[Double] = List(2.93)
 )
 ```
 
@@ -77,19 +81,88 @@ spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator <jar-file> [opti
 | roundsDistribution    | `--number-records-per-round`           | List[Long]     | 1000000    | Comma-separated record counts per round. A single value applies to all rounds; if fewer values than rounds, the last value is repeated. |
 | numColumns            | `--number-columns`                     | Int            | 10         | Number of columns in schema of generated data (min: 5)          |
 | recordSize            | `--record-size`                        | Int            | 1024       | Record size of generated data in bytes                          |
-| updateRatio           | `--update-ratio`                       | Double         | 0.5        | Ratio of updates to total records (0.0-1.0)                     |
+| updateRatios          | `--update-ratio`                       | List[Double]   | 0.5        | Ratio of updates to total records (0.0-1.0). Single value applies to all rounds; comma-separated list applies per-round with last-value fill. |
 | totalPartitions       | `--total-partitions`                   | Int            | -1         | Total number of partitions (-1 for unpartitioned)               |
 | datagenFileSize       | `--datagen-file-size`                  | Int            | 134217728  | Target data file size in bytes (default: 128MB)                 |
 | skipIfExists          | `--skip-if-exists`                     | Boolean        | false      | Skip generation if folder already exists                        |
 | startRound            | `--start-round`                        | Int            | 0          | Starting round number (for resuming generation)                 |
 | primaryKeyType        | `--primary-key-type`                   | KeyType        | Random     | Key generation type: `Random`, `TemporallyOrdered`              |
-| updatePatterns        | `--update-pattern`                     | UpdatePatterns | Uniform    | Update distribution: `Uniform`, `Zipf`                          |
-| numPartitionsToUpdate | `--num-partitions-to-update`           | Int            | -1         | Number of partitions to update (-1 for all)                     |
-| zipfianShape          | `--zipfian-shape`                      | Double         | 2.93       | Shape parameter for Zipf distribution (higher = more skewed)    |
+| updatePatterns        | `--update-pattern`                     | List[UpdatePatterns] | Uniform | Update distribution: `Uniform`, `Zipf`. Single value applies to all rounds; comma-separated list applies per-round with last-value fill. |
+| numPartitionsToUpdate | `--num-partitions-to-update`           | List[Int]      | -1         | Number of partitions to update (-1 for all). Single value applies to all rounds; comma-separated list applies per-round with last-value fill. |
+| zipfianShapes         | `--zipfian-shape`                      | List[Double]   | 2.93       | Shape parameter for Zipf distribution (higher = more skewed). Single value applies to all rounds; comma-separated list applies per-round with last-value fill. |
 | partitionDistribution | `--partition-distribution`             | String         | uniform    | Leading per-partition insert weights, zero-padded up to `--total-partitions`. Each segment must sum to 1.0. Use `;` to give round 0 a different distribution than rounds 1+ (e.g. `;0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1` → round 0 uniform, rounds 1+ concentrated in first 10 partitions). An empty segment = uniform across all partitions for that batch. |
 
 **Notes**:
 * **Record count specification**: `--number-records-per-round` accepts a comma-separated list of record counts (e.g., `22000000,22000` for a large initial load followed by smaller incremental rounds). A single value applies uniformly to all rounds. If fewer values are provided than the number of rounds, the last value is repeated for remaining rounds.
+* **Per-round variation**: The same list semantics apply to `--update-ratio`, `--update-pattern`, `--num-partitions-to-update`, and `--zipfian-shape`. This is useful when a workload has diurnal or bursty characteristics — for example, `--update-ratio 0.05,0.05,0.05,0.05,0.05,0.05,0.4,0.4,0.4,0.4,0.4,0.4` models 6 overnight rounds at 5% updates followed by 6 business-hours rounds at 40%. If fewer values than rounds are supplied, the last value is repeated. If more values than rounds are supplied, the tail is truncated.
+
+## WorkloadSynthesizer Parameters
+
+The WorkloadSynthesizer component analyzes an existing Hudi table and emits `ChangeDataGenerator` flag files that reproduce the observed workload shape. Full motivation and derivation details are in [docs/workload-synthesizer.md](docs/workload-synthesizer.md).
+
+**CLI:**
+```bash
+spark-submit --class ai.onehouse.lakeloader.WorkloadSynthesizer <jar-file> [options]
+```
+
+### Parameter Reference
+
+| Parameter                | CLI Flag                    | Type    | Default    | Description                                                                                             |
+|--------------------------|-----------------------------|---------|------------|---------------------------------------------------------------------------------------------------------|
+| tablePath                | `-t`, `--table-path`        | String  | *required* | Path to an existing Hudi table to characterize                                                          |
+| outputDir                | `-o`, `--output-dir`        | String  | *required* | Directory where `synth-full.flags`, `synth-summary.flags`, and `synth-audit.txt` will be written        |
+| maxCommits               | `--max-commits`             | Int     | all        | Cap on the number of most-recent completed commits considered                                           |
+| sinceInstant             | `--since-instant`           | String  | none       | Only consider commits with instant time >= this value (Hudi instant string, e.g. `20250101120000`)      |
+| includeArchived          | `--include-archived`        | Boolean | false      | Also walk the archived timeline (slower)                                                                |
+| minZipfShapeToEmit       | `--min-zipf-shape`          | Double  | 0.3        | Minimum fitted zipf shape below which the tool emits `Uniform` instead of `Zipf`                        |
+| keySampleSize            | `--key-sample-size`         | Int     | 500        | Number of record-key values to sample from a base parquet file when inferring primary-key type          |
+| partitionSizeSample      | `--partition-size-sample`   | Int     | 30         | Number of latest partitions (lex sort — matches datestr schemes) sampled for on-disk size. Sums the latest base file sizes per partition via Hudi's FileSystemView. Set to 0 to disable. |
+| primaryKeyTypeOverride   | `--primary-key-type`        | KeyType | inferred   | Skip inference and use this value instead (`Random` \| `TemporallyOrdered`)                             |
+| schemaFile               | `--schema-file`             | String  | none       | Path to a customer-supplied `.avsc`. If set, emit `--avro-schema` and drop `--number-columns`. If unset, tool reads the source Hudi table's schema and emits `--number-columns` matching its top-level field count. |
+| anonymizeSchema          | `--anonymize-schema`        | Boolean | false      | Rewrite field names to typed placeholders (`col_long_a`, `col_string_b`, ...) before writing `schema.avsc` into the output dir. Preserves data types and nullability. Works with both supplied and inferred schemas. |
+
+**Outputs**:
+* `synth-full.flags` — per-commit fidelity: one `--number-records-per-round` entry per source commit, preserving temporal variation.
+* `synth-summary.flags` — median records-per-round collapsed into a single value, for quick sanity runs.
+* `synth-audit.txt` — raw derived numbers, fitted zipf shapes per commit, and key-classification reasoning for review.
+* `schema.avsc` — only when `--anonymize-schema true` (or when `--schema-file` is set and anonymization is on). The emitted flag files reference this path via `--avro-schema`.
+
+The customer only needs to fill in `--path` (benchmark output location) in the emitted flag file before feeding it back into `ChangeDataGenerator`. Schema is either shipped alongside (as `schema.avsc`) or implied via `--number-columns`.
+
+## WorkloadResizer Parameters
+
+The WorkloadResizer consumes `synth-derived.json` (emitted by WorkloadSynthesizer) and applies a scale factor and/or a target partition count to produce a benchmark-sized configuration. Preserves `updateRatio`, `updatePattern`, `zipfianShape`, key type, record size, and file size; scales record volume and partition count independently.
+
+**CLI:**
+```bash
+spark-submit --class ai.onehouse.lakeloader.WorkloadResizer <jar-file> [options]
+```
+
+Or plain JVM (no Spark needed — the Resizer runs on JSON, not Hudi data):
+
+```bash
+java -cp <jar-file> ai.onehouse.lakeloader.WorkloadResizer [options]
+```
+
+### Parameter Reference
+
+| Parameter          | CLI Flag                    | Type    | Default          | Description                                                                                                                                              |
+|--------------------|-----------------------------|---------|------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| inputJson          | `-i`, `--input-json`        | String  | *required*       | Path to a `synth-derived.json` emitted by WorkloadSynthesizer                                                                                            |
+| outputDir          | `-o`, `--output-dir`        | String  | *required*       | Directory for `resized-full.flags`, `resized-summary.flags`, `resized-audit.txt`                                                                         |
+| scaleFactor        | `--scale-factor`            | Double  | 1.0              | Multiplier on per-round record counts. e.g. `0.01` → one-hundredth the volume. `numRounds` unchanged                                                     |
+| targetPartitions   | `--target-partitions`       | Int     | preserved        | New total partition count. Truncates + re-normalizes if smaller than source; extrapolates fitted zipf shape if larger. Rescales `numPartitionsToUpdate` |
+| bucketize          | `--bucketize`               | Boolean | false            | Detect runs of adjacent commits with similar characteristics in the source and emit per-round parameter lists (`--update-ratio`, `--update-pattern`, `--zipfian-shape`, `--num-partitions-to-update`) reflecting the observed burstiness. Requires `commitStats` in the input JSON. |
+| bucketUpdateRatioAbs | `--bucket-update-ratio-abs` | Double | 0.1              | Absolute update-ratio delta threshold for run boundaries.                                                                                                |
+| bucketZipfShapeAbs   | `--bucket-zipf-shape-abs`   | Double | 0.3              | Absolute zipf-shape delta threshold for run boundaries.                                                                                                  |
+| bucketRecordsRelPct  | `--bucket-records-rel-pct`  | Double | 0.25             | Relative records-per-commit delta threshold for run boundaries.                                                                                          |
+
+**Outputs**:
+* `resized-full.flags` — scaled flag string with per-commit record counts scaled by `--scale-factor`. With `--bucketize`, also emits per-round `--update-ratio` / `--update-pattern` / `--zipfian-shape` / `--num-partitions-to-update` lists.
+* `resized-summary.flags` — scaled flag string with single median records-per-round.
+* `resized-audit.txt` — before/after values for every changed parameter, a list of preserved invariants, and (when `--bucketize`) a table of detected runs.
+
+**Bucketize semantics.** When `--bucketize true` is passed, the resizer walks the source commit stats and groups adjacent commits into runs sharing similar update-ratio, insert-zipf shape, and records-per-commit. Each run then emits its mean values applied to every commit in that run, producing per-round lists whose length equals the source commit count. If the source workload is flat (single run), scalars are emitted as before. **Requires the target `ChangeDataGenerator` to support per-round list flags** (introduced in PR #53).
 
 ## IncrementalLoader Parameters
 
