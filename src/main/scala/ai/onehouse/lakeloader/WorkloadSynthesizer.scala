@@ -54,7 +54,12 @@ object WorkloadSynthesizer {
       bytesWritten: Long,
       partitionInserts: Map[String, Long],
       partitionUpdates: Map[String, Long],
-      freshFileSizes: Seq[Long])
+      freshFileSizes: Seq[Long],
+      // Absolute paths of base parquet files this commit wrote. Used by the
+      // key-type resolver to sample footer stats from the most recent commits
+      // rather than doing a full-table directory walk. Empty for commits that
+      // only appended log files (MoR delta-commits with no new base files).
+      writtenParquetPaths: Seq[String] = Seq.empty)
 
   /**
    * How the emitted flag file should describe the schema shape.
@@ -119,7 +124,7 @@ object WorkloadSynthesizer {
     require(commits.nonEmpty, s"No completed commits found under ${config.tablePath}")
 
     val (keyType, keyTypeSource, recordKeyField, keyTypeNotes) =
-      resolveKeyType(spark, metaClient, config)
+      resolveKeyType(spark, metaClient, config, commits)
 
     val (schemaChoice, schemaNotes) = resolveSchemaChoice(metaClient, config)
 
@@ -159,13 +164,14 @@ object WorkloadSynthesizer {
       case _ => filtered
     }
 
+    val basePath = metaClient.getBasePath
     bounded.flatMap { instant =>
       val details = metaClient.getActiveTimeline.getInstantDetails(instant)
       if (!details.isPresent) None
       else {
         val bytes = details.get()
         val metadata = deserializeCommitMetadata(serde, instant, bytes)
-        Some(aggregateCommit(instant, metadata))
+        Some(aggregateCommit(instant, metadata, basePath))
       }
     }
   }
@@ -190,13 +196,17 @@ object WorkloadSynthesizer {
     }
   }
 
-  private def aggregateCommit(instant: HoodieInstant, metadata: HoodieCommitMetadata): CommitAgg = {
+  private def aggregateCommit(
+      instant: HoodieInstant,
+      metadata: HoodieCommitMetadata,
+      basePath: org.apache.hudi.storage.StoragePath): CommitAgg = {
     var inserts = 0L
     var updates = 0L
     var bytesWritten = 0L
     val partitionInserts = scala.collection.mutable.HashMap[String, Long]()
     val partitionUpdates = scala.collection.mutable.HashMap[String, Long]()
     val freshFileSizes = scala.collection.mutable.ArrayBuffer[Long]()
+    val parquetPaths = scala.collection.mutable.ArrayBuffer[String]()
 
     metadata.getPartitionToWriteStats.asScala.foreach { case (partition, stats) =>
       stats.asScala.foreach { s: HoodieWriteStat =>
@@ -212,6 +222,12 @@ object WorkloadSynthesizer {
         val prev = s.getPrevCommit
         if ((prev == null || prev == "null") && s.getFileSizeInBytes > 0)
           freshFileSizes += s.getFileSizeInBytes
+        // Capture the full base-parquet path written by this stat. Skip log
+        // files (MoR delta commits) — key-type inference only reads parquet.
+        val rel = s.getPath
+        if (rel != null && rel.endsWith(".parquet")) {
+          parquetPaths += new org.apache.hudi.storage.StoragePath(basePath, rel).toString
+        }
       }
     }
 
@@ -223,7 +239,8 @@ object WorkloadSynthesizer {
       bytesWritten = bytesWritten,
       partitionInserts = partitionInserts.toMap,
       partitionUpdates = partitionUpdates.toMap,
-      freshFileSizes = freshFileSizes.toSeq)
+      freshFileSizes = freshFileSizes.toSeq,
+      writtenParquetPaths = parquetPaths.toSeq)
   }
 
   ///////////////////////
@@ -492,7 +509,8 @@ object WorkloadSynthesizer {
   private def resolveKeyType(
       spark: SparkSession,
       metaClient: HoodieTableMetaClient,
-      config: SynthesizerConfig): (KeyType, String, Option[String], Seq[String]) = {
+      config: SynthesizerConfig,
+      commits: List[CommitAgg]): (KeyType, String, Option[String], Seq[String]) = {
 
     config.primaryKeyTypeOverride match {
       case Some(kt) => return (kt, "cli-override", None, Seq(s"key-type override supplied: $kt"))
@@ -515,15 +533,27 @@ object WorkloadSynthesizer {
     }
     val keyCol = keyFields.head
 
+    // Sample parquet paths from the last N completed commits (deterministic
+    // and cheap — no full-table directory walk).
+    val recentCommits = commits.takeRight(math.max(1, config.keySampleCommits))
+    val candidatePaths = recentCommits.flatMap(_.writtenParquetPaths).take(config.keySampleFiles)
+    notes += s"key-type sample source: last ${recentCommits.size} completed commits, ${candidatePaths.size} candidate parquet files"
+
     val hadoopConf = spark.sparkContext.hadoopConfiguration
     val footerFailures = scala.collection.mutable.ArrayBuffer.empty[String]
-    val sampled: List[FooterSample] =
-      try sampleFooterStats(metaClient, keyCol, config.keySampleFiles, hadoopConf, footerFailures)
-      catch {
-        case e: Exception =>
-          notes += s"footer sampling failed globally: ${e.getClass.getSimpleName}: ${e.getMessage}"
-          Nil
+    val sampled: List[FooterSample] = candidatePaths.flatMap { pathStr =>
+      readFooterKeyStats(pathStr, keyCol, hadoopConf) match {
+        case Right((minOpt, maxOpt)) =>
+          Some(FooterSample(
+            path = pathStr,
+            instantTime = extractInstantFromFileName(pathStr),
+            min = minOpt,
+            max = maxOpt))
+        case Left(reason) =>
+          footerFailures += s"$pathStr: $reason"
+          None
       }
+    }
     notes += s"sampled ${sampled.size} base parquet file footers for record-key column '$keyCol'"
     if (footerFailures.nonEmpty) {
       notes += s"footer read failures: ${footerFailures.size} (showing up to 3)"
@@ -569,89 +599,6 @@ object WorkloadSynthesizer {
       instantTime: String,
       min: Option[String],
       max: Option[String])
-
-  /**
-   * Locate up to `maxFiles` base parquet files across the table, spread over
-   * as many partitions as possible (round-robin per partition), and extract
-   * the min/max value + instant time for `keyCol` from each parquet footer.
-   * Never materializes actual row values into memory.
-   */
-  private[lakeloader] def sampleFooterStats(
-      metaClient: HoodieTableMetaClient,
-      keyCol: String,
-      maxFiles: Int,
-      hadoopConf: org.apache.hadoop.conf.Configuration,
-      failures: scala.collection.mutable.ArrayBuffer[String] = scala.collection.mutable.ArrayBuffer.empty[String]): List[FooterSample] = {
-    val storage = metaClient.getStorage
-    val basePath = new org.apache.hudi.storage.StoragePath(metaClient.getBasePath.toString)
-
-    // Collect one list of base .parquet paths per partition directory found up to depth 5.
-    val partitionFiles: List[List[String]] = listParquetByPartition(storage, basePath, maxDepth = 5)
-    if (partitionFiles.isEmpty) return Nil
-
-    // Round-robin across partitions to get spread. Take `maxFiles` total.
-    val roundRobin = interleave(partitionFiles).take(maxFiles).toList
-
-    roundRobin.flatMap { pathStr =>
-      readFooterKeyStats(pathStr, keyCol, hadoopConf) match {
-        case Right((minOpt, maxOpt)) =>
-          Some(FooterSample(
-            path = pathStr,
-            instantTime = extractInstantFromFileName(pathStr),
-            min = minOpt,
-            max = maxOpt))
-        case Left(reason) =>
-          failures += s"$pathStr: $reason"
-          None
-      }
-    }
-  }
-
-  /** Walk the storage tree, returning parquet file paths grouped by their parent directory. */
-  private def listParquetByPartition(
-      storage: org.apache.hudi.storage.HoodieStorage,
-      root: org.apache.hudi.storage.StoragePath,
-      maxDepth: Int): List[List[String]] = {
-    val grouped = scala.collection.mutable.LinkedHashMap[String, scala.collection.mutable.ArrayBuffer[String]]()
-    def walk(p: org.apache.hudi.storage.StoragePath, depth: Int): Unit = {
-      if (depth < 0) return
-      val entries =
-        try storage.listDirectEntries(p).asScala
-        catch { case _: Exception => return }
-      val visible = entries.filter { e =>
-        val n = e.getPath.getName
-        !n.startsWith(".") && !n.startsWith("_")
-      }
-      visible.foreach { e =>
-        if (e.isFile && e.getPath.getName.endsWith(".parquet")) {
-          val parent = e.getPath.getParent.toString
-          grouped.getOrElseUpdate(parent, scala.collection.mutable.ArrayBuffer.empty) += e.getPath.toString
-        } else if (e.isDirectory) {
-          walk(e.getPath, depth - 1)
-        }
-      }
-    }
-    walk(root, maxDepth)
-    grouped.values.map(_.toList).toList
-  }
-
-  private def interleave[T](lists: List[List[T]]): Iterator[T] = new Iterator[T] {
-    private val its = lists.map(_.iterator).filter(_.hasNext).toBuffer
-    private var idx = 0
-    override def hasNext: Boolean = its.nonEmpty
-    override def next(): T = {
-      if (its.isEmpty) throw new NoSuchElementException
-      idx = idx % its.size
-      val it = its(idx)
-      val v = it.next()
-      // Invariant: when we drain and remove its(idx), the buffer element that was
-      // at idx+1 slides into idx — so the *next* call naturally moves on without
-      // an explicit idx++. We only increment idx when we did NOT remove.
-      if (!it.hasNext) its.remove(idx)
-      else idx += 1
-      v
-    }
-  }
 
   /**
    * Hudi encodes base file names as `<fileId>_<writeToken>_<instantTime>.parquet`.

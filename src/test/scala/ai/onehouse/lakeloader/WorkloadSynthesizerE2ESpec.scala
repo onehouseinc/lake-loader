@@ -80,9 +80,13 @@ class WorkloadSynthesizerE2ESpec extends AnyFunSuite with BeforeAndAfterAll {
       StructField("ts", LongType, nullable = false),
       StructField("value", IntegerType, nullable = true)))
     val now = System.currentTimeMillis()
+    // Raw UUIDs (no per-commit prefix). Real customer UUIDs are unnamespaced,
+    // and a per-commit "kN-" prefix produces artificial min-value monotonicity
+    // across commits (Spearman correlation → 1.0) that misleads the temporal
+    // signal in the classifier.
     val insertRows = partitionWeights.toSeq.flatMap { case (partition, count) =>
       (0L until count).map { i =>
-        Row(s"$keyPrefix-${UUID.randomUUID()}", partition, now + i, i.toInt)
+        Row(UUID.randomUUID().toString, partition, now + i, i.toInt)
       }
     }
     val updateRows = keysToUpdate.map { k =>

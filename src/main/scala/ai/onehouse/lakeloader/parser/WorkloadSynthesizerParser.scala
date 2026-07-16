@@ -46,10 +46,16 @@ object WorkloadSynthesizerParser {
         .action((x, c) => c.copy(minZipfShapeToEmit = x))
         .text("Minimum fitted zipf shape below which we emit Uniform instead of Zipf. Default: 0.3")
 
+      opt[Int]("key-sample-commits")
+        .action((x, c) => c.copy(keySampleCommits = x))
+        .text("Number of most-recent completed commits whose written base parquet files are used as " +
+          "the sample source for key-type inference. Small (default 3) because recent commits reflect " +
+          "steady-state workload and give deterministic sample selection (unlike full-table directory walks).")
+
       opt[Int]("key-sample-files")
         .action((x, c) => c.copy(keySampleFiles = x))
-        .text("Number of base parquet files to sample when inferring primary-key type from footer min/max " +
-          "statistics. Sampled files are spread across partitions. Default: 100")
+        .text("Cap on the total number of base parquet files sampled across --key-sample-commits. " +
+          "Default: 100")
 
       opt[Int]("key-sample-size")
         .action((x, c) => c.copy(keySampleSize = x))

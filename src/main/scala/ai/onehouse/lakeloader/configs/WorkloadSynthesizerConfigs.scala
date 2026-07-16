@@ -25,5 +25,6 @@ case class SynthesizerConfig(
     sinceInstant: Option[String] = None,
     minZipfShapeToEmit: Double = 0.3,
     primaryKeyTypeOverride: Option[KeyType] = None,
+    keySampleCommits: Int = 3,
     keySampleFiles: Int = 100,
     keySampleSize: Int = 500)
