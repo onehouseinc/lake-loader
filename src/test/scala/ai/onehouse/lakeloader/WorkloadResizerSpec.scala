@@ -41,6 +41,7 @@ class WorkloadResizerSpec extends AnyFunSuite {
       targetDataFileSize = 128 * 1024 * 1024,
       updatePattern = updatePattern,
       zipfShape = zipfShape,
+      minZipfShapeToEmit = 0.3,
       partitionDistribution = partitionDistribution,
       round0PartitionDistribution = None,
       keyType = KeyTypes.Random,
@@ -165,6 +166,7 @@ class WorkloadResizerSpec extends AnyFunSuite {
     assert(parsed.recordSize == src.recordSize)
     assert(parsed.updatePattern == src.updatePattern)
     assert(math.abs(parsed.zipfShape - src.zipfShape) < 1e-9)
+    assert(math.abs(parsed.minZipfShapeToEmit - src.minZipfShapeToEmit) < 1e-9)
     assert(parsed.keyType == src.keyType)
     parsed.partitionDistribution.zip(src.partitionDistribution).foreach { case (a, b) =>
       assert(math.abs(a - b) < 1e-9)

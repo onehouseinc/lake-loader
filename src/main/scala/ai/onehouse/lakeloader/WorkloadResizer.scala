@@ -159,8 +159,13 @@ object WorkloadResizer {
     if (runs.size < 2) return (scaled, runs) // flat workload, no bucketization
 
     val perRoundUR = BucketRun.expandPerRound(runs, r => round3(r.meanUpdateRatio))
+    // Use the source-side threshold for Uniform-vs-Zipf decisions rather than
+    // a duplicated hardcoded value. If synth-derived.json is old and doesn't
+    // carry the threshold, parseSynthDerivedJson defaults to 0.3 (matches the
+    // synthesizer's default and the prior hardcoded value here).
+    val zipfPatternThreshold = scaled.minZipfShapeToEmit
     val perRoundPattern = BucketRun.expandPerRound(runs, r =>
-      if (r.meanInsertZipfShape >= 0.3) UpdatePatterns.Zipf else UpdatePatterns.Uniform)
+      if (r.meanInsertZipfShape >= zipfPatternThreshold) UpdatePatterns.Zipf else UpdatePatterns.Uniform)
     val perRoundZipf = BucketRun.expandPerRound(runs, r => round3(r.meanInsertZipfShape))
     // Preserve source-partition fraction, applied to *scaled* totalPartitions.
     val srcTotalParts = math.max(sourceCommitStats.maxBy(_.numPartitionsWithInserts).numPartitionsWithInserts, 1)
@@ -359,6 +364,9 @@ object WorkloadResizer {
       targetDataFileSize = intVal("targetDataFileSize"),
       updatePattern = updatePattern,
       zipfShape = doubleVal("zipfShape"),
+      // Older synth-derived.json (pre-#54 review fix) doesn't have this key —
+      // default to 0.3, which was the hardcoded value in the initial resizer.
+      minZipfShapeToEmit = numVal("minZipfShapeToEmit").map(_.toDouble).getOrElse(0.3),
       partitionDistribution = partitionDistribution,
       round0PartitionDistribution = round0PartitionDistribution,
       keyType = keyType,

@@ -95,6 +95,11 @@ object WorkloadSynthesizer {
       targetDataFileSize: Int,
       updatePattern: UpdatePatterns.UpdatePatterns,
       zipfShape: Double,
+      // Threshold used during derivation to decide Uniform vs Zipf. Round-tripped
+      // through synth-derived.json so downstream tools (the Resizer's --bucketize
+      // in particular) apply the same threshold on per-bucket zipf shapes rather
+      // than duplicating a hardcoded value.
+      minZipfShapeToEmit: Double,
       partitionDistribution: List[Double],
       round0PartitionDistribution: Option[List[Double]],
       keyType: KeyType,
@@ -361,6 +366,7 @@ object WorkloadSynthesizer {
       targetDataFileSize = targetDataFileSize,
       updatePattern = updatePattern,
       zipfShape = zipfShape,
+      minZipfShapeToEmit = config.minZipfShapeToEmit,
       partitionDistribution = partitionDistribution.map(roundTo(_, 6)),
       round0PartitionDistribution = round0Distribution.map(_.map(roundTo(_, 6))),
       keyType = keyType,
@@ -923,6 +929,7 @@ object WorkloadSynthesizer {
     sb.append(s"""  "targetDataFileSize": ${d.targetDataFileSize},""").append("\n")
     sb.append(s"""  "updatePattern": ${q(d.updatePattern.toString)},""").append("\n")
     sb.append(s"""  "zipfShape": ${d.zipfShape},""").append("\n")
+    sb.append(s"""  "minZipfShapeToEmit": ${d.minZipfShapeToEmit},""").append("\n")
     sb.append(s"""  "partitionDistribution": ${jsonList(d.partitionDistribution, (x: Double) => x.toString)},""").append("\n")
     sb.append(s"""  "round0PartitionDistribution": $round0Json,""").append("\n")
     sb.append(s"""  "keyType": ${q(d.keyType.toString)},""").append("\n")

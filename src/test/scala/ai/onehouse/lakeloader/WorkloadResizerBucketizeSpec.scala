@@ -51,6 +51,7 @@ class WorkloadResizerBucketizeSpec extends AnyFunSuite {
       targetDataFileSize = 128 * 1024 * 1024,
       updatePattern = UpdatePatterns.Zipf,
       zipfShape = 1.5,
+      minZipfShapeToEmit = 0.3,
       partitionDistribution = List(0.5, 0.3, 0.15, 0.05),
       round0PartitionDistribution = None,
       keyType = KeyTypes.Random,
@@ -131,6 +132,22 @@ class WorkloadResizerBucketizeSpec extends AnyFunSuite {
       s"flat bucket should be Uniform, got ${patterns.take(5)}")
     assert(patterns.drop(5).forall(_ == UpdatePatterns.Zipf),
       s"skewed bucket should be Zipf, got ${patterns.drop(5)}")
+  }
+
+  test("per-bucket Uniform-vs-Zipf uses source's minZipfShapeToEmit rather than a fixed 0.3") {
+    // Commits with zipf=0.5 — above the default 0.3, below a bumped 1.0.
+    // Emit source with minZipfShapeToEmit=1.0 and verify all buckets emit Uniform.
+    val lowShape = List.fill(5)(commitStat("a", 1000, 100, 3, 2, 0.5))
+    val highShape = List.fill(5)(commitStat("b", 1000, 500, 3, 8, 0.6))
+    val stats = lowShape ++ highShape
+    val src = derivedFromCommits(stats).copy(minZipfShapeToEmit = 1.0)
+    val (out, runs) = WorkloadResizer.applyBucketize(src, stats,
+      ResizerConfig(bucketize = true))
+    assert(runs.size == 2, s"expected 2 runs, got ${runs.size}")
+    val patterns = out.perRoundUpdatePatterns.getOrElse(fail("expected patterns"))
+    // With minZipfShapeToEmit=1.0 and observed shapes 0.5/0.6, both buckets stay Uniform.
+    assert(patterns.forall(_ == UpdatePatterns.Uniform),
+      s"all buckets should be Uniform with threshold=1.0 (shapes=0.5/0.6); got $patterns")
   }
 
   ///////////////////////
