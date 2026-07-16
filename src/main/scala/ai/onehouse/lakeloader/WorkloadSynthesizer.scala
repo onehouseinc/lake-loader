@@ -740,11 +740,13 @@ object WorkloadSynthesizer {
 
     // Signal 1: UUID-domain saturation. UUIDs are lowercase hex; a random-hash
     // key column will have mins near '0' and maxes near 'f' in most files.
+    // We also handle prefix-namespaced keys like "<tenant>-<uuid>" by peeking
+    // past the first separator when the leading char isn't hex.
     val lowChars = "0123".toSet
     val highChars = "cdef".toSet
     val hexShapeHits = valid.count { s =>
-      val minChar = s.min.get.headOption.map(_.toLower).getOrElse(' ')
-      val maxChar = s.max.get.headOption.map(_.toLower).getOrElse(' ')
+      val minChar = uuidRelevantHead(s.min.get)
+      val maxChar = uuidRelevantHead(s.max.get)
       lowChars.contains(minChar) && highChars.contains(maxChar)
     }
     val hexShapeRatio = hexShapeHits.toDouble / valid.size
@@ -760,10 +762,9 @@ object WorkloadSynthesizer {
     notes += f"footer stats: temporal-correlation(instant vs min)=$temporalCorr%.3f"
 
     // Signal 3: Per-file range width — for UUIDs, min-prefix ≠ max-prefix in most files.
+    // Uses the same "peek past separator" so prefix-namespaced UUIDs still register width.
     val widePerFile = valid.count { s =>
-      val mn = s.min.get
-      val mx = s.max.get
-      mn.headOption.map(_.toLower) != mx.headOption.map(_.toLower)
+      uuidRelevantHead(s.min.get) != uuidRelevantHead(s.max.get)
     }
     val widePerFileRatio = widePerFile.toDouble / valid.size
     notes += f"footer stats: per-file-range-width=${widePerFileRatio}%.2f"
@@ -791,6 +792,35 @@ object WorkloadSynthesizer {
       (KeyTypes.Random, "footer-stats-ambiguous", notes.toSeq)
     }
   }
+
+  /**
+   * Return the leading char most useful for UUID-domain detection. For a bare
+   * value ("550e8400-...") this is just the first char lowercased. For a
+   * prefix-namespaced value ("tenant42-550e8400-...") we skip past the first
+   * `-`, `_`, or `:` separator and use the char after it — so the classifier
+   * still sees `'5'` / `'f'` for the actual UUID content, rather than the
+   * literal `'t'` from the tenant prefix.
+   *
+   * Only used for classification signals — the raw min/max are still used
+   * elsewhere (Spearman correlation) so the temporal signal is unaffected.
+   */
+  private[lakeloader] def uuidRelevantHead(value: String): Char = {
+    if (value.isEmpty) return ' '
+    val first = value.charAt(0).toLower
+    if (isHex(first)) return first
+    // Not hex at position 0 — try just past the first separator, if any.
+    val len = value.length
+    val idxDash = value.indexOf('-')
+    val idxUnd = value.indexOf('_')
+    val idxCol = value.indexOf(':')
+    val candidates = List(idxDash, idxUnd, idxCol).filter(_ >= 0)
+    if (candidates.isEmpty) return first
+    val sepIdx = candidates.min
+    if (sepIdx + 1 >= len) first else value.charAt(sepIdx + 1).toLower
+  }
+
+  private def isHex(c: Char): Boolean =
+    (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
 
   /** Spearman rank correlation between two equal-length sequences of comparable values. */
   private[lakeloader] def spearmanRankCorrelation(a: Seq[String], b: Seq[String]): Double = {

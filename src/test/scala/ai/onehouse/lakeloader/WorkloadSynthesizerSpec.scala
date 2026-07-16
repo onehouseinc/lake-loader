@@ -383,6 +383,48 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
     assert(source == "insufficient-footer-stats")
   }
 
+  test("classifyFromFooterStats: prefix-namespaced UUID keys still classify as Random") {
+    // Real-world shape: keys like "tenant42-<uuid>". Footer min/max both start
+    // with the prefix character; classifier needs to peek past the '-'.
+    val samples = (1 to 10).map { i =>
+      FooterSample(
+        path = s"/f$i.parquet",
+        instantTime = f"2025010${i}%d",
+        min = Some(s"tenant$i-0${randomHexTail(6)}"),
+        max = Some(s"tenant$i-f${randomHexTail(6)}"))
+    }.toList
+    val (kt, source, _) = WorkloadSynthesizer.classifyFromFooterStats(samples)
+    assert(kt == KeyTypes.Random,
+      s"expected Random for tenant-prefixed UUIDs, got $kt (source=$source)")
+  }
+
+  test("uuidRelevantHead returns first char when it is hex") {
+    assert(WorkloadSynthesizer.uuidRelevantHead("0abc-def") == '0')
+    assert(WorkloadSynthesizer.uuidRelevantHead("fabc-def") == 'f')
+    assert(WorkloadSynthesizer.uuidRelevantHead("5abc-def") == '5')
+  }
+
+  test("uuidRelevantHead peeks past first separator when leading char is non-hex") {
+    // dash separator
+    assert(WorkloadSynthesizer.uuidRelevantHead("tenant-0abc") == '0')
+    assert(WorkloadSynthesizer.uuidRelevantHead("tenant-fabc") == 'f')
+    // underscore
+    assert(WorkloadSynthesizer.uuidRelevantHead("tenant_5abc") == '5')
+    // colon
+    assert(WorkloadSynthesizer.uuidRelevantHead("tenant:5abc") == '5')
+    // uppercase input lowercased
+    assert(WorkloadSynthesizer.uuidRelevantHead("Tenant-F1AB") == 'f')
+  }
+
+  test("uuidRelevantHead falls back to raw first char when no separator or empty tail") {
+    // No separator at all
+    assert(WorkloadSynthesizer.uuidRelevantHead("tenant") == 't')
+    // Separator at end with nothing after
+    assert(WorkloadSynthesizer.uuidRelevantHead("tenant-") == 't')
+    // Empty string
+    assert(WorkloadSynthesizer.uuidRelevantHead("") == ' ')
+  }
+
   private def randomHexTail(len: Int): String = {
     val r = new scala.util.Random(42)
     val chars = "0123456789abcdef"
