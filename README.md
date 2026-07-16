@@ -128,6 +128,8 @@ spark-submit --class ai.onehouse.lakeloader.WorkloadSynthesizer <jar-file> [opti
 
 The customer only needs to fill in `--path` (benchmark output location) in the emitted flag file before feeding it back into `ChangeDataGenerator`. Schema is either shipped alongside (as `schema.avsc`) or implied via `--number-columns`.
 
+The synthesizer also detects the source table's Record-Level Index (RLI) mode by inspecting file-IDs in the `record_index` metadata partition, and emits `rliMode` (`"none"` | `"global"` | `"partitioned"` | `"unknown"`) in `synth-derived.json` and `synth-audit.txt`. The benchmarking side reads this to configure the target Hudi table's RLI mode to match; the value is not emitted as a `ChangeDataGenerator` flag since the generator doesn't write to a Hudi index directly.
+
 ## WorkloadResizer Parameters
 
 The WorkloadResizer consumes `synth-derived.json` (emitted by WorkloadSynthesizer) and applies a scale factor and/or a target partition count to produce a benchmark-sized configuration. Preserves `updateRatio`, `updatePattern`, `zipfianShape`, key type, record size, and file size; scales record volume and partition count independently.

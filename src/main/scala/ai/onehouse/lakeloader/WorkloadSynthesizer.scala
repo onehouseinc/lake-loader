@@ -91,6 +91,13 @@ object WorkloadSynthesizer {
       keyTypeSource: String,
       recordKeyField: Option[String],
       schemaChoice: SchemaChoice,
+      // Record-Level Index mode observed on the source table's metadata.
+      // One of "none" (RLI not enabled), "global" (single flat file-group set
+      // covering all keys), "partitioned" (one file-group set per data
+      // partition, encoded into the RLI file-IDs), or "unknown" (RLI is
+      // enabled but the file-id shape didn't match either known pattern —
+      // see audit for a sample).
+      rliMode: String = "none",
       auditNotes: Seq[String])
 
   def main(args: Array[String]): Unit = {
@@ -128,8 +135,12 @@ object WorkloadSynthesizer {
 
     val (schemaChoice, schemaNotes) = resolveSchemaChoice(metaClient, config)
 
+    val (rliMode, rliNotes) = resolveRliMode(metaClient)
+
     val derived = deriveConfig(
-      commits, config, keyType, keyTypeSource, recordKeyField, schemaChoice, keyTypeNotes ++ schemaNotes)
+      commits, config, keyType, keyTypeSource, recordKeyField, schemaChoice,
+      auditNotesPrefix = keyTypeNotes ++ schemaNotes ++ rliNotes,
+      rliMode = rliMode)
 
     writeOutputs(hadoopConf, config.outputDir, derived, config.tablePath)
     println(s"[WorkloadSynthesizer] Wrote synth-full.flags, synth-summary.flags, and synth-audit.txt to ${config.outputDir}")
@@ -254,7 +265,8 @@ object WorkloadSynthesizer {
       keyTypeSource: String,
       recordKeyField: Option[String],
       schemaChoice: SchemaChoice,
-      auditNotesPrefix: Seq[String] = Nil): DerivedConfig = {
+      auditNotesPrefix: Seq[String] = Nil,
+      rliMode: String = "none"): DerivedConfig = {
 
     val recordsPerRound = commits.map(c => c.inserts + c.updates)
     val numRounds = commits.size
@@ -350,6 +362,7 @@ object WorkloadSynthesizer {
       keyTypeSource = keyTypeSource,
       recordKeyField = recordKeyField,
       schemaChoice = schemaChoice,
+      rliMode = rliMode,
       auditNotes = auditNotes)
   }
 
@@ -366,6 +379,108 @@ object WorkloadSynthesizer {
   private def roundTo(x: Double, decimals: Int): Double = {
     val f = math.pow(10, decimals)
     math.round(x * f) / f
+  }
+
+  ///////////////////////
+  // RLI mode detection
+  ///////////////////////
+
+  private val RLI_METADATA_PARTITION = "record_index"
+  private val RLI_FILE_ID_PREFIX = "record-index-"
+  // Global RLI file-IDs: full ID is `record-index-<0000>-<0>`. After stripping
+  // the "record-index-" prefix, what's left matches `\d{4,}-\d+`.
+  private val RLI_GLOBAL_SUFFIX = "^\\d{4,}-\\d+$".r
+  // Partitioned RLI file-IDs: full ID is `record-index-<encoded-partition>-<0000>-<0>`.
+  // After stripping the prefix, what's left ends with `-\d{4,}-\d+` and has
+  // a non-empty partition segment before that.
+  private val RLI_PARTITIONED_SUFFIX = ".+-\\d{4,}-\\d+$".r
+
+  /**
+   * Detect whether the source table has RLI enabled, and if so whether it's
+   * global or partitioned. Classification is by file-ID naming in the
+   * `record_index` metadata partition:
+   *
+   *  - Global RLI: file-IDs look like `record-index-0000-0`, `record-index-0001-0`.
+   *  - Partitioned RLI: file-IDs look like `record-index-<encoded-partition>-0000-0`.
+   *
+   * The trailing `-\d{4,}-\d+` is stripped; if what's left is exactly the
+   * literal `record-index-`, it's global. If there's a residual segment
+   * between the prefix and the numeric tail, it's a partition path.
+   *
+   * Defensive: unrecognized shapes return "unknown" with an audit note; the
+   * synthesizer run does not fail.
+   */
+  private[lakeloader] def resolveRliMode(
+      metaClient: HoodieTableMetaClient): (String, Seq[String]) = {
+    val notes = scala.collection.mutable.ArrayBuffer[String]()
+    val enabledPartitions =
+      try metaClient.getTableConfig.getMetadataPartitions.asScala
+      catch {
+        case e: Exception =>
+          notes += s"RLI detection: could not read metadata partitions: ${e.getClass.getSimpleName}: ${e.getMessage}"
+          return ("none", notes.toSeq)
+      }
+    if (!enabledPartitions.contains(RLI_METADATA_PARTITION)) {
+      notes += "RLI: not enabled on source table (record_index absent from metadata partitions)"
+      return ("none", notes.toSeq)
+    }
+
+    val storage = metaClient.getStorage
+    val rliDir = new org.apache.hudi.storage.StoragePath(
+      metaClient.getBasePath.toString + "/.hoodie/metadata/" + RLI_METADATA_PARTITION)
+
+    val fileIds: List[String] =
+      try {
+        storage.listDirectEntries(rliDir).asScala
+          .filter(e => e.isFile)
+          .map(_.getPath.getName)
+          .filter(name => !name.startsWith(".") && !name.startsWith("_"))
+          // Hudi base file names: <fileId>_<writeToken>_<instantTime>.<ext>
+          .map(name => name.split("_").headOption.getOrElse(""))
+          .filter(_.startsWith(RLI_FILE_ID_PREFIX))
+          .toList.distinct
+      } catch {
+        case e: Exception =>
+          notes += s"RLI: could not list metadata dir $rliDir: ${e.getClass.getSimpleName}: ${e.getMessage}"
+          return ("unknown", notes.toSeq)
+      }
+
+    if (fileIds.isEmpty) {
+      notes += s"RLI: metadata partition $RLI_METADATA_PARTITION exists but no file-IDs found; treating as unknown"
+      return ("unknown", notes.toSeq)
+    }
+
+    val (mode, distinct) = classifyRliFileIds(fileIds)
+    notes += s"RLI: sampled ${fileIds.size} file-IDs from $RLI_METADATA_PARTITION; classifications=${distinct.mkString(",")}"
+    notes += s"RLI: sample file-IDs: ${fileIds.take(3).mkString(", ")}"
+    if (mode == "unknown") {
+      notes += s"RLI: mixed or unrecognized file-ID shapes ($distinct); emitting 'unknown'"
+    }
+    (mode, notes.toSeq)
+  }
+
+  /**
+   * Pure classification helper. Given a list of RLI file-IDs, decide whether
+   * they represent a global RLI, a partitioned RLI, or an unrecognized shape.
+   * Returns (mode, distinctPerIdClassifications) so callers can log the raw
+   * per-ID breakdown when the aggregate is "unknown".
+   */
+  private[lakeloader] def classifyRliFileIds(fileIds: Seq[String]): (String, Set[String]) = {
+    if (fileIds.isEmpty) return ("unknown", Set.empty)
+    val classifications = fileIds.map { fid =>
+      if (!fid.startsWith(RLI_FILE_ID_PREFIX)) "unknown"
+      else {
+        val stripped = fid.stripPrefix(RLI_FILE_ID_PREFIX)
+        if (RLI_GLOBAL_SUFFIX.pattern.matcher(stripped).matches()) "global"
+        else if (RLI_PARTITIONED_SUFFIX.pattern.matcher(stripped).matches()) "partitioned"
+        else "unknown"
+      }
+    }.toSet
+    val mode =
+      if (classifications == Set("global")) "global"
+      else if (classifications == Set("partitioned")) "partitioned"
+      else "unknown"
+    (mode, classifications)
   }
 
   ///////////////////////
@@ -885,7 +1000,8 @@ object WorkloadSynthesizer {
     sb.append(s"""  "keyType": ${q(d.keyType.toString)},""").append("\n")
     sb.append(s"""  "keyTypeSource": ${q(d.keyTypeSource)},""").append("\n")
     sb.append(s"""  "recordKeyField": ${d.recordKeyField.map(q).getOrElse("null")},""").append("\n")
-    sb.append(s"""  "schemaChoice": $schemaJson""").append("\n")
+    sb.append(s"""  "schemaChoice": $schemaJson,""").append("\n")
+    sb.append(s"""  "rliMode": ${q(d.rliMode)}""").append("\n")
     sb.append("}\n")
     sb.toString
   }
@@ -969,6 +1085,7 @@ object WorkloadSynthesizer {
         case SuppliedSchema(p) => s"SuppliedSchema($p)"
         case InferredColumnCount(n) => s"InferredColumnCount(numColumns=$n)"
       }}",
+      s"  rliMode=${d.rliMode}",
       "",
       "audit-notes:")
     val notes = d.auditNotes.map(n => s"  - $n")

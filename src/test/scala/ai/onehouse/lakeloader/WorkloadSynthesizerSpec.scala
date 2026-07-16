@@ -430,4 +430,58 @@ class WorkloadSynthesizerSpec extends AnyFunSuite {
     val chars = "0123456789abcdef"
     (1 to len).map(_ => chars(r.nextInt(chars.length))).mkString
   }
+
+  ///////////////////////
+  // RLI mode classification
+  ///////////////////////
+
+  test("classifyRliFileIds: global RLI (no partition segment) -> global") {
+    val fileIds = Seq("record-index-0000-0", "record-index-0001-0", "record-index-0002-0")
+    val (mode, distinct) = WorkloadSynthesizer.classifyRliFileIds(fileIds)
+    assert(mode == "global")
+    assert(distinct == Set("global"))
+  }
+
+  test("classifyRliFileIds: partitioned RLI (with data-partition segment) -> partitioned") {
+    val fileIds = Seq(
+      "record-index-2025-01-15-0000-0",   // partition path "2025-01-15"
+      "record-index-2025-01-16-0000-0",
+      "record-index-2025-01-17-0000-0")
+    val (mode, distinct) = WorkloadSynthesizer.classifyRliFileIds(fileIds)
+    assert(mode == "partitioned")
+    assert(distinct == Set("partitioned"))
+  }
+
+  test("classifyRliFileIds: mixed shapes -> unknown") {
+    val fileIds = Seq(
+      "record-index-0000-0",              // global-looking
+      "record-index-2025-01-15-0000-0")   // partitioned-looking
+    val (mode, distinct) = WorkloadSynthesizer.classifyRliFileIds(fileIds)
+    assert(mode == "unknown", s"mixed classifications should yield 'unknown', got $mode")
+    assert(distinct == Set("global", "partitioned"))
+  }
+
+  test("classifyRliFileIds: unrecognized shape (missing numeric suffix) -> unknown") {
+    val fileIds = Seq("record-index-garbage", "record-index-alsobad")
+    val (mode, distinct) = WorkloadSynthesizer.classifyRliFileIds(fileIds)
+    assert(mode == "unknown")
+    assert(distinct == Set("unknown"))
+  }
+
+  test("classifyRliFileIds: empty input -> unknown") {
+    val (mode, distinct) = WorkloadSynthesizer.classifyRliFileIds(Nil)
+    assert(mode == "unknown")
+    assert(distinct.isEmpty)
+  }
+
+  test("classifyRliFileIds: partitioned with hive-style partition path") {
+    // Hive-style partition paths use "=" and get escaped; the encoded form
+    // still has segments between the prefix and numeric suffix.
+    val fileIds = Seq(
+      "record-index-year%3D2025%2Fmonth%3D01-0000-0",
+      "record-index-year%3D2025%2Fmonth%3D02-0000-0")
+    val (mode, distinct) = WorkloadSynthesizer.classifyRliFileIds(fileIds)
+    assert(mode == "partitioned")
+    assert(distinct == Set("partitioned"))
+  }
 }
