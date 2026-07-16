@@ -29,11 +29,11 @@ import java.io.{ByteArrayInputStream, PrintWriter}
 import scala.collection.JavaConverters._
 
 /**
- * Walks the active (optionally archived) timeline of an existing Hudi table and
- * emits a lake-loader ChangeDataGenerator configuration that reproduces the
- * observed workload characteristics. Two flag files are written side-by-side:
- * `synth-full.flags` (per-commit fidelity) and `synth-summary.flags` (single
- * median round). A companion `synth-audit.txt` records the raw derived numbers.
+ * Walks the active timeline of an existing Hudi table and emits a lake-loader
+ * ChangeDataGenerator configuration that reproduces the observed workload
+ * characteristics. Two flag files are written side-by-side: `synth-full.flags`
+ * (per-commit fidelity) and `synth-summary.flags` (single median round). A
+ * companion `synth-audit.txt` records the raw derived numbers.
  */
 object WorkloadSynthesizer {
 
@@ -137,14 +137,15 @@ object WorkloadSynthesizer {
   private def loadCommits(
       metaClient: HoodieTableMetaClient,
       config: SynthesizerConfig): List[CommitAgg] = {
-    val timelines = if (config.includeArchived) {
-      List(metaClient.getArchivedTimeline, metaClient.getActiveTimeline.getAllCommitsTimeline)
-    } else {
-      List(metaClient.getActiveTimeline.getAllCommitsTimeline)
-    }
+    // Only the active timeline is walked. Archived timeline is intentionally
+    // excluded — HoodieArchivedTimeline needs its own instant-details reader,
+    // and "recent workload characterization" (last N commits in active) is the
+    // useful lens for benchmarking. Users wanting more history can dial
+    // Hudi's archival threshold on the source table.
+    val activeTimeline = metaClient.getActiveTimeline.getAllCommitsTimeline
     val serde = metaClient.getTimelineLayout.getCommitMetadataSerDe
 
-    val allInstants = timelines.flatMap(_.filterCompletedInstants().getInstants.iterator().asScala.toList)
+    val allInstants = activeTimeline.filterCompletedInstants().getInstants.iterator().asScala.toList
       .filter(i => WRITE_ACTIONS.contains(i.getAction))
       .sortBy(_.requestedTime)
 

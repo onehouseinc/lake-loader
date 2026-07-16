@@ -127,13 +127,12 @@ spark-submit --class ai.onehouse.lakeloader.WorkloadSynthesizer lake-loader-0.2.
   --output-dir <local-or-hadoop-fs-path> \
   [--max-commits <n>] \
   [--since-instant <instant>] \
-  [--include-archived true] \
   [--min-zipf-shape 0.3] \
   [--primary-key-type Random|TemporallyOrdered] \
   [--key-sample-size 500]
 ```
 
-`--max-commits` and `--since-instant` bound the analysis window when a table has a very long history — usually we want the last few weeks, not multi-year archive. `--primary-key-type` skips inference if the customer already knows the shape of their keys. `--min-zipf-shape` is the cutoff below which the fitted skew is treated as uniform (i.e. don't emit `Zipf` for statistical noise).
+`--max-commits` and `--since-instant` bound the analysis window when a table has a very long history. The synthesizer only walks the active timeline (archived-timeline analysis was intentionally excluded — the recent-workload view is what benchmarks care about). `--primary-key-type` skips inference if the customer already knows the shape of their keys. `--min-zipf-shape` is the cutoff below which the fitted skew is treated as uniform (i.e. don't emit `Zipf` for statistical noise).
 
 ## Schema handling
 

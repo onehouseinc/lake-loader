@@ -23,7 +23,6 @@ case class SynthesizerConfig(
     anonymizeSchema: Boolean = false,
     maxCommits: Option[Int] = None,
     sinceInstant: Option[String] = None,
-    includeArchived: Boolean = false,
     minZipfShapeToEmit: Double = 0.3,
     primaryKeyTypeOverride: Option[KeyType] = None,
     keySampleFiles: Int = 100,

@@ -42,10 +42,6 @@ object WorkloadSynthesizerParser {
         .action((x, c) => c.copy(sinceInstant = Some(x)))
         .text("Only consider commits with instant time >= this value (Hudi instant string, e.g. 20250101120000)")
 
-      opt[Boolean]("include-archived")
-        .action((x, c) => c.copy(includeArchived = x))
-        .text("Also walk the archived timeline. Slower; default: false")
-
       opt[Double]("min-zipf-shape")
         .action((x, c) => c.copy(minZipfShapeToEmit = x))
         .text("Minimum fitted zipf shape below which we emit Uniform instead of Zipf. Default: 0.3")

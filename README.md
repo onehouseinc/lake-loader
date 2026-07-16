@@ -112,7 +112,6 @@ spark-submit --class ai.onehouse.lakeloader.WorkloadSynthesizer <jar-file> [opti
 | outputDir                | `-o`, `--output-dir`        | String  | *required* | Directory where `synth-full.flags`, `synth-summary.flags`, and `synth-audit.txt` will be written        |
 | maxCommits               | `--max-commits`             | Int     | all        | Cap on the number of most-recent completed commits considered                                           |
 | sinceInstant             | `--since-instant`           | String  | none       | Only consider commits with instant time >= this value (Hudi instant string, e.g. `20250101120000`)      |
-| includeArchived          | `--include-archived`        | Boolean | false      | Also walk the archived timeline (slower)                                                                |
 | minZipfShapeToEmit       | `--min-zipf-shape`          | Double  | 0.3        | Minimum fitted zipf shape below which the tool emits `Uniform` instead of `Zipf`                        |
 | keySampleSize            | `--key-sample-size`         | Int     | 500        | Number of record-key values to sample from a base parquet file when inferring primary-key type          |
 | primaryKeyTypeOverride   | `--primary-key-type`        | KeyType | inferred   | Skip inference and use this value instead (`Random` \| `TemporallyOrdered`)                             |
