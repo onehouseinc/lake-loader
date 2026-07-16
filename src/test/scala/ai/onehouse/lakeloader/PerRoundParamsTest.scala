@@ -184,4 +184,29 @@ class PerRoundParamsTest extends AnyFunSuite {
     val cfg = parse(Array("--path", "/tmp/out", "--num-partitions-to-update", "-1,10,-1"))
     assert(cfg.numPartitionsToUpdate == List(-1, 10, -1))
   }
+
+  test("deprecated scalar-overload of generateWorkload is still resolvable via reflection") {
+    // Cheap check that both overloads exist on the class: the current
+    // list-based method and the @deprecated scalar-parameter one. Uses
+    // reflection to avoid actually invoking a Spark job.
+    val cls = classOf[ChangeDataGenerator]
+    val methods = cls.getMethods.filter(_.getName == "generateWorkload")
+    assert(methods.length >= 2,
+      s"expected at least 2 overloads of generateWorkload, found ${methods.length}: " +
+        methods.map(m => m.getParameterTypes.map(_.getSimpleName).mkString(",")).mkString("; "))
+    // Scalar overload: primitive Double + primitive Int (updateRatio, numPartitionsToUpdate).
+    val scalarSig = methods.find { m =>
+      val paramTypes = m.getParameterTypes
+      paramTypes.exists(_ == java.lang.Double.TYPE) &&
+        paramTypes.exists(_ == java.lang.Integer.TYPE)
+    }
+    assert(scalarSig.isDefined,
+      s"no generateWorkload overload with (double, int) primitives — deprecated scalar overload missing")
+    // New overload: uses scala.collection.immutable.List for the four per-round params.
+    val listSig = methods.find { m =>
+      m.getParameterTypes.count(_ == classOf[scala.collection.immutable.List[_]]) >= 4
+    }
+    assert(listSig.isDefined,
+      "no generateWorkload overload with 4+ List params — new list-based signature missing")
+  }
 }

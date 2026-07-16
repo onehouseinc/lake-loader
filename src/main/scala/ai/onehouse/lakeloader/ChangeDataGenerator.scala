@@ -107,6 +107,54 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
    * @param updatePatterns                 Update pattern for generating updates: random (uniform) or zipf (skewed).
    * @param numPartitionsToUpdate          Number of partitions to update (default -1/ none)
    */
+  /**
+   * Deprecated scalar-parameter overload preserved for external Scala callers
+   * that used the pre-per-round-list signature. Each scalar broadcasts to a
+   * single-element List and delegates to the new list-based method.
+   *
+   * Note: named-argument callers cannot use this overload — Scala's overload
+   * resolution requires positional-or-fully-named calls for overloaded methods
+   * with default arguments. Positional calls work fine.
+   */
+  @deprecated(
+    "Use the list-based signature (updateRatios, updatePatterns, " +
+      "numPartitionsToUpdate as List[Int], zipfianShapes). This overload " +
+      "forwards each scalar as a single-element list.",
+    "0.3")
+  def generateWorkload(
+      path: String,
+      roundsDistribution: List[Long],
+      numColumns: Int,
+      recordSize: Int,
+      updateRatio: Double,
+      totalPartitions: Int,
+      partitionDistributionMatrixOpt: Option[List[List[Double]]],
+      targetDataFileSize: Int,
+      skipIfExists: Boolean,
+      keyType: KeyType,
+      startRound: Int,
+      updatePattern: UpdatePatterns,
+      numPartitionsToUpdate: Int,
+      zipfianShape: Double,
+      avroSchemaPath: Option[String]): Unit = {
+    generateWorkload(
+      path = path,
+      roundsDistribution = roundsDistribution,
+      numColumns = numColumns,
+      recordSize = recordSize,
+      updateRatios = List(updateRatio),
+      totalPartitions = totalPartitions,
+      partitionDistributionMatrixOpt = partitionDistributionMatrixOpt,
+      targetDataFileSize = targetDataFileSize,
+      skipIfExists = skipIfExists,
+      keyType = keyType,
+      startRound = startRound,
+      updatePatterns = List(updatePattern),
+      numPartitionsToUpdate = List(numPartitionsToUpdate),
+      zipfianShapes = List(zipfianShape),
+      avroSchemaPath = avroSchemaPath)
+  }
+
   def generateWorkload(
       path: String,
       roundsDistribution: List[Long] = List.fill(numRounds)(1000000L),
