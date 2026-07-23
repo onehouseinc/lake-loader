@@ -87,9 +87,79 @@ spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator <jar-file> [opti
 | numPartitionsToUpdate | `--num-partitions-to-update`           | Int            | -1         | Number of partitions to update (-1 for all)                     |
 | zipfianShape          | `--zipfian-shape`                      | Double         | 2.93       | Shape parameter for Zipf distribution (higher = more skewed)    |
 | partitionDistribution | `--partition-distribution`             | String         | uniform    | Leading per-partition insert weights, zero-padded up to `--total-partitions`. Each segment must sum to 1.0. Use `;` to give round 0 a different distribution than rounds 1+ (e.g. `;0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1` → round 0 uniform, rounds 1+ concentrated in first 10 partitions). An empty segment = uniform across all partitions for that batch. |
+| workloadSpecPath (`generateFineGrainedWorkload`) | `--workload-spec`      | String         | (none)     | Path to a JSON workload spec for fine-grained, exact per-partition control. See [Fine-Grained Workload Spec](#fine-grained-workload-spec). |
 
 **Notes**:
 * **Record count specification**: `--number-records-per-round` accepts a comma-separated list of record counts (e.g., `22000000,22000` for a large initial load followed by smaller incremental rounds). A single value applies uniformly to all rounds. If fewer values are provided than the number of rounds, the last value is repeated for remaining rounds.
+
+### Fine-Grained Workload Spec
+
+While the parameters above shape workloads statistically (ratios and distributions), the
+`--workload-spec` flag instead **exactly mimics a real table's commit history**: every round
+gets precise per-partition insert/update counts. This is useful for replaying production
+ingestion patterns captured from actual commit metadata.
+
+**Spec file format** (JSON):
+```json
+{
+  "bootstrap": {
+    "startDate": "2026-01-01",
+    "endDate": "2026-03-31",
+    "totalRecords": 100000000
+  },
+  "commits": [
+    {
+      "2026-01-01": {"inserts": 1000, "updates": 500},
+      "2026-01-02": {"inserts": 2000}
+    },
+    {
+      "2026-02-01": {"updates": 5000}
+    }
+  ]
+}
+```
+
+**Semantics**:
+* **Round 0 (bootstrap)**: `totalRecords` inserts distributed evenly across one partition per
+  day in `[startDate, endDate]` (both inclusive). Partition values are `yyyy-MM-dd` strings.
+* **Round k (k ≥ 1)**: replays `commits[k-1]`. Each entry maps a partition date to exact
+  insert/update counts — list only the partitions the commit touches. `inserts`/`updates`
+  default to 0 when omitted.
+* **Updates** are sampled uniformly at random from the latest version of the keys already
+  present in that partition (from earlier rounds only). Updates may only target partitions
+  that already have data — a date inside the bootstrap range or one a *prior* commit inserted
+  into. If fewer keys exist than requested, all keys are updated and a warning is logged.
+* **Inserts** may open brand-new partitions outside the bootstrap date range (e.g. new daily
+  partitions arriving over time).
+* Counts are **exact**, not probabilistic — unlike the distribution-based mode.
+* The number of rounds is derived from the spec (`1 + commits.length`).
+
+**CLI example**:
+```bash
+spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator <jar-file> \
+  --path s3a://output/workload \
+  --workload-spec s3a://config/workload_spec.json \
+  --record-size 1024
+```
+
+**Scala API example**:
+```scala
+import ai.onehouse.lakeloader.ChangeDataGenerator
+import ai.onehouse.lakeloader.configs.FineGrainedWorkloadSpec
+
+val spec = FineGrainedWorkloadSpec.fromJsonFile(
+  "s3a://config/workload_spec.json",
+  spark.sparkContext.hadoopConfiguration)
+val datagen = new ChangeDataGenerator(spark, spec.totalRounds)
+datagen.generateFineGrainedWorkload("s3a://output/workload", spec)
+```
+
+When `--workload-spec` is set, the flags `--number-rounds`, `--number-records-per-round`,
+`--update-ratio`, `--total-partitions`, `--partition-distribution`, `--update-pattern` and
+`--num-partitions-to-update` are ignored. `--record-size`, `--number-columns`,
+`--avro-schema`, `--datagen-file-size`, `--skip-if-exists`, `--start-round` and
+`--primary-key-type` work the same as in the distribution-based mode (including the
+sample-write record-size estimation for custom Avro schemas).
 
 ## IncrementalLoader Parameters
 

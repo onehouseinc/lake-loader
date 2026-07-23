@@ -33,7 +33,8 @@ case class DatagenConfig(
     numPartitionsToUpdate: Int = -1,
     zipfianShape: Double = 2.93,
     avroSchemaPath: Option[String] = None,
-    partitionDistribution: Option[PartitionDistributionSpec] = None)
+    partitionDistribution: Option[PartitionDistributionSpec] = None,
+    workloadSpecPath: Option[String] = None)
 
 /**
  * Per-round split for the CLI partition distribution flag.
