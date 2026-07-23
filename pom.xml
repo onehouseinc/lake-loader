@@ -41,12 +41,14 @@
     <maven-surefire-plugin.version>2.19.1</maven-surefire-plugin.version>
     <maven-shade-plugin.version>3.1.1</maven-shade-plugin.version>
     <log4j.version>1.2.17</log4j.version>
-    <spark.version>3.5.3</spark.version>
+    <spark.version>3.3.4</spark.version>
     <scala.version>2.12.10</scala.version>
     <scala.libversion>2.12</scala.libversion>
     <hudi.version>1.1.1</hudi.version>
-    <iceberg.version>1.9.0</iceberg.version>
-    <delta.version>3.3.2</delta.version>
+    <!-- Iceberg 1.8.1 is the last release with a Spark 3.3 runtime (dropped in 1.9.0) -->
+    <iceberg.version>1.8.1</iceberg.version>
+    <!-- Delta for Spark 3.3 is the 2.3.x line, published as delta-core (renamed to delta-spark in 3.0) -->
+    <delta.version>2.3.0</delta.version>
     <scopt.version>4.1.0</scopt.version>
     <scalafmt-maven-plugin.version>1.1.1640084764.9f463a9</scalafmt-maven-plugin.version>
     <scalatest.version>3.2.19</scalatest.version>
@@ -188,7 +190,7 @@
     </dependency>
     <dependency>
       <groupId>org.apache.hudi</groupId>
-      <artifactId>hudi-spark3.5-bundle_2.12</artifactId>
+      <artifactId>hudi-spark3.3-bundle_2.12</artifactId>
       <version>${hudi.version}</version>
       <scope>provided</scope>
     </dependency>
@@ -200,7 +202,7 @@
     </dependency>
     <dependency>
       <groupId>org.apache.iceberg</groupId>
-      <artifactId>iceberg-spark-runtime-3.5_2.12</artifactId>
+      <artifactId>iceberg-spark-runtime-3.3_2.12</artifactId>
       <version>${iceberg.version}</version>
       <scope>provided</scope>
     </dependency>
@@ -224,7 +226,7 @@
     </dependency>
     <dependency>
       <groupId>io.delta</groupId>
-      <artifactId>delta-spark_2.12</artifactId>
+      <artifactId>delta-core_2.12</artifactId>
       <version>${delta.version}</version>
       <scope>provided</scope>
     </dependency>
