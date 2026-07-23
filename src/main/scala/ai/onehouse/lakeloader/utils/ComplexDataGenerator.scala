@@ -72,7 +72,9 @@ object ComplexDataGenerator extends Serializable {
 
     dataType match {
       case StringType =>
-        StringUtils.generateRandomString(Math.max(sizeFactor + random.nextInt(Math.max(sizeFactor, 1)), 1))
+        StringUtils.generateRandomString(
+          Math.max(sizeFactor + random.nextInt(Math.max(sizeFactor, 1)), 1),
+          random)
 
       case IntegerType =>
         random.nextInt()
@@ -121,7 +123,7 @@ object ComplexDataGenerator extends Serializable {
         val childSizeFactor = Math.max(sizeFactor / 4, 1)
         (0 until size).map { _ =>
           val k = keyType match {
-            case StringType => StringUtils.generateRandomString(8)
+            case StringType => StringUtils.generateRandomString(8, random)
             case _ => generateValue(keyType, nullable = false, childSizeFactor, random)
           }
           k -> generateValue(valueType, valueContainsNull, childSizeFactor, random)

@@ -44,7 +44,6 @@ import scala.util.Random
 class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) extends Serializable {
 
   private val SEED: Long = 378294793957830L
-  private val random = new Random(SEED)
 
   import spark.implicits._
 
@@ -79,7 +78,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       partitionPaths: List[String],
       partitionDistributionCDF: List[Double],
       keyType: KeyType,
-      schema: StructType) = {
+      schema: StructType,
+      random: Random) = {
     ComplexDataGenerator.generateRow(
       schema,
       round,
@@ -89,6 +89,19 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       size,
       random)
   }
+
+  /**
+   * Deterministic per-task RNG. Every Spark task deserializes an identical copy of this
+   * instance, so sharing the closure-captured `this.random` makes all tasks of a stage emit
+   * IDENTICAL value sequences. That duplication is invisible in the row counts but parquet
+   * dictionary encoding dedupes the repeats, silently deflating on-disk sizes (and the
+   * record-size estimate) by up to the stage parallelism. Seed by (round, partition index)
+   * instead: distinct data per task, still fully reproducible across reruns. The round occupies
+   * the high 32 bits of the seed offset so no (round, partitionIndex) pair can collide with
+   * another.
+   */
+  private def taskRandom(round: Int, partitionIndex: Int): Random =
+    new Random(SEED + (round.toLong << 32) + partitionIndex)
 
   /**
    * Executes the spark DAG to generate the workload ahead of time, for the configured number of rounds.
@@ -152,7 +165,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
 
     // When a custom Avro schema is supplied, the user-provided --record-size is just a width hint
     // for variable-length fields (strings/binary). The actual on-disk row size depends on the schema
-    // and can be very different. Sample-write 100K rows as parquet, measure the compressed size,
+    // and can be very different. Sample-write a bounded batch of rows as parquet, measure the compressed size,
     // and use that directly as bytes/record for parallelism. Since the sample is already compressed
     // parquet (same format as the real output), we skip COMPRESSION_RATIO_GUESS for this path.
     val (effectiveRecordSize, effectiveCompressionRatio) = avroSchemaPath match {
@@ -166,7 +179,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
         println(
           s"""
              |$lineSepBold
-             |Estimated record size from custom schema: $estimated bytes/record (compressed parquet avg over 100K sample rows).
+             |Estimated record size from custom schema: $estimated bytes/record (compressed parquet avg over sample rows).
              |Overriding --record-size=$recordSize for parallelism computation.
              |$lineSepBold
              |""".stripMargin)
@@ -218,20 +231,27 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
         // Generating inserts
         ////////////////////////////////////////
         val insertsRDD = genParallelRDD(spark, targetParallelism, 0, numInserts)
-          .map(_ =>
-            generateNewRecord(
-              curRound,
-              recordSize,
-              partitionPaths,
-              partitionDistributionCDF,
-              keyType,
-              schema))
+          .mapPartitionsWithIndex { (partIdx, it) =>
+            val random = taskRandom(curRound, partIdx)
+            it.map(_ =>
+              generateNewRecord(
+                curRound,
+                recordSize,
+                partitionPaths,
+                partitionDistributionCDF,
+                keyType,
+                schema,
+                random))
+          }
 
         val insertsDF = spark.createDataFrame(insertsRDD, schema)
         val upsertDF =
           if (numUpdates == 0) insertsDF
           else
-            insertsDF.union(
+            // unionByName: the update path's key-join reorders columns (join keys first), so a
+            // positional union would silently misalign — or fail on — schemas whose key/partition/
+            // round fields are not the leading columns (e.g. custom Avro schemas).
+            insertsDF.unionByName(
               generateUpdates(
                 updatePatterns,
                 partitionPaths,
@@ -257,8 +277,9 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
   }
 
   /**
-   * Estimate the on-disk size per record for a given schema by writing 100K sample rows to a
-   * temporary parquet directory under `basePath` and measuring its size. The sample is generated
+   * Estimate the on-disk size per record for a given schema by writing a bounded number of
+   * sample rows (~20MB worth, deduced from the --record-size hint) as a single parquet file
+   * under `basePath` and measuring its size. The sample is generated
    * with the same ComplexDataGenerator code path used by the real workload so the estimate
    * reflects actual generator output (variable-length strings, nested types, nulls, etc.).
    *
@@ -277,8 +298,19 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       partitionPaths: List[String],
       recordSizeHint: Int,
       keyType: KeyType): Int = {
-    val sampleCount: Long = 100000L
+    // Bound the sample by bytes, not a fixed row count: at large --record-size a fixed 100K-row
+    // sample can dwarf the actual workload (100K x 100KB = ~10GB of throwaway data). Deduce the
+    // row count from the user's --record-size to target ~20MB of sample data, clamped to
+    // [1000, 200000] rows so tiny hints stay bounded and huge hints still sample enough rows
+    // for a stable average.
+    val targetSampleBytes = 20L * 1024 * 1024
     val sampleParallelism = 4
+    val requestedSampleRows =
+      Math.min(200000L, Math.max(1000L, targetSampleBytes / Math.max(recordSizeHint, 1)))
+    // genParallelRDD generates floor(count / parallelism) rows per task, so keep the row count
+    // an exact multiple of the parallelism — otherwise the bytes/record division below would
+    // use more rows than were actually written.
+    val sampleCount: Long = (requestedSampleRows / sampleParallelism) * sampleParallelism
     // Place the sample under the user's output path so the temp dir lives on the same filesystem
     // (avoids cross-FS issues when basePath is s3://, gs://, etc.).
     val samplePath = s"$basePath/.record_size_sample_${System.currentTimeMillis()}"
@@ -291,21 +323,28 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     val samplePartitionPaths = List(partitionPaths.head)
 
     try {
-      // Reuse generateNewRecord so the sample uses the same closure-captured `this.random` per
-      // task as the real workload — each task advances one Random across its rows, mirroring
-      // production-path entropy. Constructing `new Random(SEED)` per row instead would make every
-      // sample row identical and compress unrealistically well.
+      // Reuse generateNewRecord with the same per-task seeded RNG scheme as the real workload:
+      // each task advances its own distinctly-seeded Random across its rows, so no two tasks
+      // emit duplicate values that parquet dictionary encoding would dedupe (which would deflate
+      // the measured bytes/record). Use a round number real rounds never use so the sample data
+      // does not replicate round 0's exact values.
       val sampleRDD = genParallelRDD(spark, sampleParallelism, 0, sampleCount)
-        .map(_ =>
-          generateNewRecord(
-            round = 0,
-            size = recordSizeHint,
-            partitionPaths = samplePartitionPaths,
-            partitionDistributionCDF = sampleCDF,
-            keyType = keyType,
-            schema = schema))
+        .mapPartitionsWithIndex { (partIdx, it) =>
+          val random = taskRandom(round = -1, partIdx)
+          it.map(_ =>
+            generateNewRecord(
+              round = 0,
+              size = recordSizeHint,
+              partitionPaths = samplePartitionPaths,
+              partitionDistributionCDF = sampleCDF,
+              keyType = keyType,
+              schema = schema,
+              random = random))
+        }
 
       val sampleDF = spark.createDataFrame(sampleRDD, schema)
+      // repartition(1) writes a single parquet file so footer/dictionary overhead is measured
+      // exactly once; generation upstream of the shuffle boundary still runs in parallel.
       sampleDF
         .repartition(1)
         .write
@@ -314,6 +353,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
         .save(samplePath)
 
       val totalBytes = fs.getContentSummary(samplePathHadoop).getLength
+      println(s"Record size sample: $sampleCount rows, $totalBytes bytes on disk")
       Math.max((totalBytes / sampleCount).toInt, 1)
     } finally {
       if (fs.exists(samplePathHadoop)) {
@@ -358,27 +398,32 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     val updateSchema = rawUpdatesDF.schema
     // Regenerate all non-key scalar columns with new values so updates have different data.
     // Complex types (StructType, ArrayType, MapType) are left unchanged — sufficient for benchmarking.
-    val finalUpdatedDf = updateSchema.fields.foldLeft(rawUpdatesDF) { (df, field) =>
-      field.name match {
-        case "key" | "partition" => df
-        case "round" => df.withColumn(field.name, lit(currentRound))
-        case "ts" => df.withColumn(field.name, lit(newTs))
+    // Build a single select() instead of chaining withColumn per field: each withColumn adds
+    // another projection layer to the plan, and for wide schemas the analyzer cost of the
+    // resulting deeply-nested plan dominates the actual work.
+    val projectedColumns = updateSchema.fields.map { field =>
+      val column = field.name match {
+        case "key" | "partition" => col(field.name)
+        case "round" => lit(currentRound)
+        case "ts" => lit(newTs)
         case _ =>
           field.dataType match {
-            case StringType => df.withColumn(field.name, expr("uuid()"))
-            case LongType => df.withColumn(field.name, (rand() * Long.MaxValue).cast(LongType))
-            case IntegerType => df.withColumn(field.name, (rand() * Int.MaxValue).cast(IntegerType))
-            case FloatType => df.withColumn(field.name, rand().cast(FloatType))
-            case DoubleType => df.withColumn(field.name, rand().cast(DoubleType))
-            case BooleanType => df.withColumn(field.name, (rand() > 0.5).cast(BooleanType))
-            case DateType => df.withColumn(field.name, current_date())
-            case TimestampType => df.withColumn(field.name, current_timestamp())
+            case StringType => expr("uuid()")
+            case LongType => (rand() * Long.MaxValue).cast(LongType)
+            case IntegerType => (rand() * Int.MaxValue).cast(IntegerType)
+            case FloatType => rand().cast(FloatType)
+            case DoubleType => rand().cast(DoubleType)
+            case BooleanType => (rand() > 0.5).cast(BooleanType)
+            case DateType => current_date()
+            case TimestampType => current_timestamp()
             case dt: DecimalType =>
-              df.withColumn(field.name, (rand() * Math.pow(10, dt.precision - dt.scale)).cast(dt))
-            case _ => df // leave complex types (StructType, ArrayType, MapType, BinaryType) unchanged
+              (rand() * Math.pow(10, dt.precision - dt.scale)).cast(dt)
+            case _ => col(field.name) // leave complex types (StructType, ArrayType, MapType, BinaryType) unchanged
           }
       }
+      column.as(field.name)
     }
+    val finalUpdatedDf = rawUpdatesDF.select(projectedColumns: _*)
 
     // NOTE: Applying this limit does not guarantee that exactly N elements will be contained in the
     //       returned dataset, since it might not be applying Spark's [[GlobalLimit]] operator.
@@ -458,10 +503,14 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
 
     var sourceDf = spark.read.format(ChangeDataGenerator.DEFAULT_DATA_GEN_FORMAT).load(s"$path/*")
     sourceDf = sourceDf.filter(col("partition").isin(partitionsToUpdate: _*))
-    sourceDf.createOrReplaceTempView("source_df_partitions")
+    sourceDf.select("key", "partition", "round").createOrReplaceTempView("source_df_partitions")
 
+    // Rank on the narrow (key, partition, round) projection only — running the window over
+    // SELECT * shuffles every column of the source through the rank, which is prohibitively
+    // expensive for wide schemas. The sampled keys are joined back to the full rows below
+    // (same structure as the Zipf path).
     var rankedDF = spark.sql("""
-        | SELECT *, rank(key) OVER (PARTITION BY key ORDER BY round DESC) as key_rank
+        | SELECT key, partition, `round`, rank(key) OVER (PARTITION BY key ORDER BY round DESC) as key_rank
         | FROM source_df_partitions
         |""".stripMargin)
     rankedDF = rankedDF.filter($"key_rank" === 1).drop(s"key_rank")
@@ -473,10 +522,12 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       s"Picking random updates for round: # $currentRound: from total records = $totalRecords, " +
         s"targeted update records = $numUpdateRecords, sampling ratio = $samplingRatio")
 
-    val finalDF = rankedDF
+    val sampledKeys = rankedDF
       .sample(samplingRatio)
       .limit(numUpdateRecords.toInt)
-    finalDF
+
+    // Fetch the full-width rows only for the sampled keys.
+    sourceDf.join(sampledKeys, Seq("key", "partition", "round"), "inner")
   }
 
   private def genDateBasedPartitionValues(targetPartitionsCount: Int): List[String] = {

@@ -19,10 +19,20 @@ object StringUtils {
   val lineSepBold = "=" * 50
   val lineSepLight = "-" * 50
 
-  def generateRandomString(length: Int): String = {
-    val chars = ('a' to 'z') ++ ('A' to 'Z') ++ ('0' to '9') ++ "!@#$%^&*()-_=+[]{};:,.<>/?".toSeq
-    val r = new scala.util.Random()
-    (1 to length).map(_ => chars(r.nextInt(chars.length))).mkString
+  private val RANDOM_CHARS: Array[Char] =
+    (('a' to 'z') ++ ('A' to 'Z') ++ ('0' to '9') ++ "!@#$%^&*()-_=+[]{};:,.<>/?".toSeq).toArray
+
+  def generateRandomString(length: Int): String =
+    generateRandomString(length, new scala.util.Random())
+
+  def generateRandomString(length: Int, random: scala.util.Random): String = {
+    val arr = new Array[Char](length)
+    var i = 0
+    while (i < length) {
+      arr(i) = RANDOM_CHARS(random.nextInt(RANDOM_CHARS.length))
+      i += 1
+    }
+    new String(arr)
   }
 
 }
