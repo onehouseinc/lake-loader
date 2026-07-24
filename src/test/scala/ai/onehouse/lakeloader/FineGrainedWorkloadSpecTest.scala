@@ -141,6 +141,23 @@ class FineGrainedWorkloadSpecTest extends AnyFunSuite {
       "Unknown field 'records'")
   }
 
+  // JSON objects with repeated keys are legal text but collapse to the last occurrence in a
+  // tree parse — earlier counts would be silently dropped. STRICT_DUPLICATE_DETECTION makes
+  // this fail loudly instead.
+  test("duplicate partition dates within a commit are rejected") {
+    expectInvalid(
+      """{"bootstrap": {"startDate": "2026-01-01", "endDate": "2026-01-05", "totalRecords": 10},
+        | "commits": [{"2026-01-01": {"inserts": 100}, "2026-01-01": {"inserts": 900}}]}""".stripMargin,
+      "Duplicate field")
+  }
+
+  test("duplicate top-level fields are rejected") {
+    expectInvalid(
+      """{"bootstrap": {"startDate": "2026-01-01", "endDate": "2026-01-05", "totalRecords": 10},
+        | "bootstrap": {"startDate": "2026-01-01", "endDate": "2026-01-05", "totalRecords": 99}}""".stripMargin,
+      "Duplicate field")
+  }
+
   test("updates to a partition with no prior data are rejected") {
     expectInvalid(
       """{"bootstrap": {"startDate": "2026-01-01", "endDate": "2026-01-05", "totalRecords": 10},

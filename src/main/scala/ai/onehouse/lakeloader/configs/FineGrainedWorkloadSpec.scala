@@ -14,7 +14,7 @@
 
 package ai.onehouse.lakeloader.configs
 
-import com.fasterxml.jackson.core.JsonProcessingException
+import com.fasterxml.jackson.core.{JsonParser, JsonProcessingException}
 import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
@@ -99,9 +99,14 @@ object FineGrainedWorkloadSpec {
    * with a descriptive message on any malformed or semantically invalid input.
    */
   def fromJsonString(json: String): FineGrainedWorkloadSpec = {
+    // STRICT_DUPLICATE_DETECTION: a commit object with the same partition date twice is legal
+    // JSON text, but Jackson's tree keeps only the last occurrence — silently dropping the
+    // earlier counts. Fail loudly instead: duplicate dates almost certainly mean a bug in the
+    // script that produced the spec.
+    val mapper = new ObjectMapper().enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
     val root =
       try {
-        new ObjectMapper().readTree(json)
+        mapper.readTree(json)
       } catch {
         case e: JsonProcessingException =>
           throw new IllegalArgumentException(s"Workload spec is not valid JSON: ${e.getMessage}", e)

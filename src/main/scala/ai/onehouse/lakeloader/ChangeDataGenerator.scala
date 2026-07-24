@@ -164,7 +164,9 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
         getSchema(numColumns)
     }
 
-    val (effectiveRecordSize, effectiveCompressionRatio) =
+    // Lazy: with a custom Avro schema the sizing does a ~20MB sample write; only pay for it
+    // when some round actually generates (a fully skipped --skip-if-exists rerun never does).
+    lazy val effectiveSizing =
       resolveEffectiveSizing(path, schema, partitionPaths, recordSize, keyType, avroSchemaPath)
 
     ////////////////////////////////////////
@@ -194,6 +196,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
         // Use ceiling so the per-file size never exceeds targetDataFileSize. With floor,
         // 7.67 truncates to 7 and each file overshoots the cap; ceil → 8 keeps every file
         // strictly under the configured target (default 128 MB).
+        val (effectiveRecordSize, effectiveCompressionRatio) = effectiveSizing
         val estimatedTotalBytes =
           targetRecords.toDouble * effectiveRecordSize * effectiveCompressionRatio
         val targetParallelism =
@@ -309,7 +312,9 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       case None =>
         getSchema(numColumns)
     }
-    val (effectiveRecordSize, effectiveCompressionRatio) =
+    // Lazy: with a custom Avro schema the sizing does a ~20MB sample write; only pay for it
+    // when some round actually generates (a fully skipped --skip-if-exists rerun never does).
+    lazy val effectiveSizing =
       resolveEffectiveSizing(path, schema, bootstrapPartitions, recordSize, keyType, avroSchemaPath)
 
     (startRound until totalRounds).foreach(curRound => {
@@ -334,6 +339,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
         val numUpdates = updateCounts.map(_._2).sum
 
         // Use ceiling so the per-file size never exceeds targetDataFileSize (see generateWorkload).
+        val (effectiveRecordSize, effectiveCompressionRatio) = effectiveSizing
         val estimatedTotalBytes =
           (numInserts + numUpdates).toDouble * effectiveRecordSize * effectiveCompressionRatio
         val targetParallelism =
@@ -358,6 +364,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
             keyType,
             schema,
             targetParallelism)
+        var persistedIntermediates: Seq[DataFrame] = Seq.empty
         val upsertDF =
           if (numUpdates == 0) insertsDF
           else {
@@ -365,10 +372,10 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
             // rounds strictly before this one (a plain `$path/*` glob could pick up stale data
             // from later rounds when re-generating with startRound in the middle).
             val priorRoundPaths = (0 until curRound).map(r => s"$path/$r")
-            insertsDF.unionByName(
-              regenerateUpdateValues(
-                getExactPerPartitionUpdates(updateCounts, priorRoundPaths, curRound),
-                curRound))
+            val (rawUpdatesDF, persisted) =
+              getExactPerPartitionUpdates(updateCounts, priorRoundPaths, curRound)
+            persistedIntermediates = persisted
+            insertsDF.unionByName(regenerateUpdateValues(rawUpdatesDF, curRound))
           }
 
         spark.time {
@@ -380,6 +387,9 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
             .save(targetLocation)
         }
 
+        // The update picker's cached intermediates are only consumed by the write above;
+        // release them promptly so long many-round runs don't accumulate storage memory.
+        persistedIntermediates.foreach(_.unpersist())
         spark.catalog.clearCache()
       }
     })
@@ -455,11 +465,14 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
    * candidate set, then a per-partition `row_number` trims to the exact requested count. If a
    * partition holds fewer keys than requested, all of its keys are updated and a warning is
    * logged.
+   *
+   * Returns the raw update rows plus the persisted intermediates backing them; the caller must
+   * unpersist those once the round consuming the rows has been written.
    */
   private def getExactPerPartitionUpdates(
       updateCounts: Seq[(String, Long)],
       priorRoundPaths: Seq[String],
-      currentRound: Int): DataFrame = {
+      currentRound: Int): (DataFrame, Seq[DataFrame]) = {
     val partitionsToUpdate = updateCounts.map(_._1)
     println(
       s"Generating exact per-partition updates for round # $currentRound: " +
@@ -539,7 +552,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     }
 
     // Fetch the full-width rows only for the picked keys.
-    sourceDf.join(pickedDF, Seq("key", "partition", "round"), "inner")
+    (sourceDf.join(pickedDF, Seq("key", "partition", "round"), "inner"), Seq(rankedDF, pickedDF))
   }
 
   /**
