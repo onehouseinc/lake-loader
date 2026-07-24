@@ -410,13 +410,18 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       keyType: KeyType,
       schema: StructType,
       targetParallelism: Int): DataFrame = {
-    val totalInserts = insertCounts.map(_._2).sum
+    // Drop zero-count entries (e.g. bootstrap totalRecords < numPartitions): they would create
+    // duplicate cumulative boundaries below, and binarySearch makes no guarantee which duplicate
+    // it returns — a row could get misassigned to a partition specced for 0 records. Filtering
+    // keeps the boundaries strictly increasing, making the lookup unambiguous.
+    val positiveCounts = insertCounts.filter(_._2 > 0)
+    val totalInserts = positiveCounts.map(_._2).sum
     if (totalInserts == 0) {
       return spark.createDataFrame(spark.sparkContext.emptyRDD[Row], schema)
     }
     // Singleton partition list per entry so generateRow's CDF sampling degenerates to a fixed pick.
-    val partitionSingletons = insertCounts.map(t => List(t._1)).toArray
-    val cumulativeEnds = insertCounts.map(_._2).scanLeft(0L)(_ + _).tail.toArray
+    val partitionSingletons = positiveCounts.map(t => List(t._1)).toArray
+    val cumulativeEnds = positiveCounts.map(_._2).scanLeft(0L)(_ + _).tail.toArray
     val singletonCDF = List(1.0)
 
     val insertsRDD = genExactParallelRDD(spark, targetParallelism, totalInserts)

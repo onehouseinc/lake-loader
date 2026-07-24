@@ -137,6 +137,33 @@ class FineGrainedWorkloadGenTest extends AnyFunSuite with BeforeAndAfterAll {
         Set("2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"))
   }
 
+  // Regression: zero-count partitions (bootstrap totalRecords < numPartitions) previously
+  // produced duplicate cumulative boundaries in generateExactInserts, and binarySearch could
+  // return either duplicate — misassigning rows into a partition specced for 0 records.
+  test("bootstrap with fewer records than partitions leaves trailing partitions empty") {
+    import org.apache.spark.sql.functions._
+
+    val spec = FineGrainedWorkloadSpec.fromJsonString("""
+      |{
+      |  "bootstrap": {"startDate": "2026-02-01", "endDate": "2026-02-05", "totalRecords": 2}
+      |}""".stripMargin)
+
+    val outputPath = s"file://${workDir.toAbsolutePath}/workload_sparse_bootstrap"
+    new ChangeDataGenerator(spark, spec.totalRounds)
+      .generateFineGrainedWorkload(outputPath, spec, recordSize = 256)
+
+    val round0 = spark.read.parquet(s"$outputPath/0")
+    assert(round0.count() == 2)
+    val counts = round0
+      .groupBy("partition")
+      .count()
+      .collect()
+      .map(r => r.getAs[String]("partition") -> r.getAs[Long]("count"))
+      .toMap
+    // remainder goes to the earliest partitions, one record each; the rest stay empty
+    assert(counts == Map("2026-02-01" -> 1L, "2026-02-02" -> 1L))
+  }
+
   test("updates requesting more keys than exist update all available keys with a warning") {
     val spec = FineGrainedWorkloadSpec.fromJsonString("""
       |{
