@@ -133,6 +133,12 @@ ingestion patterns captured from actual commit metadata.
   partitions arriving over time).
 * Counts are **exact**, not probabilistic — unlike the distribution-based mode.
 * The number of rounds is derived from the spec (`1 + commits.length`).
+* **Validation is strict and fails at parse time**: malformed dates, negative counts,
+  all-zero entries, unknown/typo'd field names, updates targeting partitions with no prior
+  data, and duplicate partition dates within a commit (repeated JSON keys would otherwise
+  silently collapse to the last occurrence) are all rejected with descriptive errors.
+* With `--skip-if-exists`, a rerun where every round already exists skips generation
+  entirely — including the sample-write record-size estimation for custom Avro schemas.
 
 **CLI example**:
 ```bash
