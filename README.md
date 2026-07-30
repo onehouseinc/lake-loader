@@ -77,6 +77,8 @@ def generateWorkload(
   updatePatterns: UpdatePatterns = UpdatePatterns.Uniform,
   numPartitionsToUpdate: Int = -1,
   zipfianShape: Double = 2.93,
+  avroSchemaPath: Option[String] = None,
+  sparkSchemaPath: Option[String] = None,
   variantSpec: VariantSpec = VariantSpec.disabled
 )
 ```
@@ -105,6 +107,7 @@ spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator <jar-file> [opti
 | numPartitionsToUpdate | `--num-partitions-to-update`           | Int            | -1         | Number of partitions to update (-1 for all)                     |
 | zipfianShape          | `--zipfian-shape`                      | Double         | 2.93       | Shape parameter for Zipf distribution (higher = more skewed)    |
 | partitionDistribution | `--partition-distribution`             | String         | uniform    | Leading per-partition insert weights, zero-padded up to `--total-partitions`. Each segment must sum to 1.0. Use `;` to give round 0 a different distribution than rounds 1+ (e.g. `;0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1` → round 0 uniform, rounds 1+ concentrated in first 10 partitions). An empty segment = uniform across all partitions for that batch. |
+| sparkSchemaPath       | `--spark-schema`                       | String         | none       | Path to a Spark schema file (DDL or Spark schema JSON). Supports VARIANT, including nested |
 | numVariantColumns     | `--num-variant-columns`                | Int            | 0          | Number of VARIANT columns to append after the regular columns. Spark 4 build only |
 | variantNumKeys        | `--variant-num-keys`                   | Int            | 8          | Keys per level in the generated VARIANT JSON object             |
 | variantNestingDepth   | `--variant-nesting-depth`              | Int            | 1          | Nesting depth of the generated VARIANT JSON object (1 = flat)   |
@@ -237,6 +240,34 @@ loader.doWrites(
 
 For a v3 merge-on-read table, `rewrite_data_files` (used by async compaction) also rewrites data files whose deletion vectors cover at least 30% of their rows — Iceberg's `delete-ratio-threshold` default.
 
+### Custom Schemas
+
+Two ways to drive generation from a schema you supply instead of the generated flat schema. Both make `--number-columns` irrelevant, and both trigger the sample-write record-size estimator (see `--record-size` notes).
+
+| Flag | Format | VARIANT |
+|---|---|---|
+| `--avro-schema <path>` | Avro `.avsc` | **no** — Avro has no variant type |
+| `--spark-schema <path>` | Spark DDL **or** Spark schema JSON | **yes**, anywhere in the record |
+
+`--spark-schema` accepts either encoding, detected from the first non-whitespace character:
+
+```
+key STRING, ts BIGINT, decimal_field DECIMAL(20,2),
+nested_record STRUCT<nested_int: INT, level: STRING>,
+array_field ARRAY<STRUCT<nested_int: INT, level: STRING>>,
+payload VARIANT,
+variant_in_struct STRUCT<v: VARIANT, i: INT>,
+variant_in_array ARRAY<VARIANT>,
+variant_in_map MAP<STRING, VARIANT>
+```
+
+or the JSON form, i.e. the output of `df.schema.json` (variant serializes as `"type":"variant"`), which is convenient for copying a schema off an existing table.
+
+Notes:
+* **`partition` and `round` are appended automatically** when the schema omits them — both custom-schema paths do this. The generator populates `key`, `partition`, `round` and `ts` by name, and the update path reads `partition`/`round` back from written data, so upsert rounds work without you declaring them.
+* VARIANT requires the Spark 4 build. `--num-variant-columns` is rejected alongside `--spark-schema` — declare the columns in the schema instead.
+* `src/test/resources/basic_schema_variant.ddl` is a worked example covering the full complex-type range plus variant at top level and nested in a struct, array and map.
+
 ### VARIANT Columns
 
 The data generator can append VARIANT columns holding generated JSON objects, for benchmarking semi-structured ingest.
@@ -258,7 +289,7 @@ With `--variant-num-keys 6 --variant-nesting-depth 2`:
  "k4":["x9..","p2..","k7.."],"k5":{"k0":"..","k1":-732543189,"k2":0.88,"k3":false,"k4":[".."],"k5":".."}}
 ```
 
-VARIANT columns cannot be combined with `--avro-schema` (Avro has no variant type); that combination is rejected.
+VARIANT columns cannot be combined with `--avro-schema` (Avro has no variant type); that combination is rejected. Use [`--spark-schema`](#custom-schemas) to place VARIANT in a custom schema, including nested inside structs, arrays and maps.
 
 **Generate, then load into an Iceberg v3 MOR table:**
 ```bash

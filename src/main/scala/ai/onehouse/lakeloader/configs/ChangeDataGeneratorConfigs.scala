@@ -33,6 +33,7 @@ case class DatagenConfig(
     numPartitionsToUpdate: Int = -1,
     zipfianShape: Double = 2.93,
     avroSchemaPath: Option[String] = None,
+    sparkSchemaPath: Option[String] = None,
     partitionDistribution: Option[PartitionDistributionSpec] = None,
     numVariantColumns: Int = 0,
     variantNumKeys: Int = 8,

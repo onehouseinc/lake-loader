@@ -15,11 +15,14 @@
 package org.apache.spark.sql
 
 import org.apache.spark.sql.functions.expr
+import org.apache.spark.sql.types.{DataType, VariantType}
+import org.apache.spark.types.variant.VariantBuilder
+import org.apache.spark.unsafe.types.VariantVal
 
 /**
  * Spark 4 implementation of the VARIANT touch points. VARIANT only exists in Spark 4
- * (`org.apache.spark.sql.types.VariantType`, SQL function `parse_json`), so every API usage that
- * would not compile against Spark 3.5 is isolated here — see the `scala-spark3` counterpart.
+ * (`VariantType`, `VariantVal`, `parse_json`), so every API usage that would not compile against
+ * Spark 3.5 is isolated here — see the `scala-spark3` counterpart.
  */
 object VariantUtil {
 
@@ -28,8 +31,24 @@ object VariantUtil {
   /** No-op on the Spark 4 build, where VARIANT is available. */
   def requireSupported(): Unit = ()
 
+  /** The VARIANT Spark type, for building schemas without a compile-time Spark 4 dependency. */
+  def variantType: DataType = VariantType
+
   /**
-   * Converts the named JSON-string columns of `df` into VARIANT columns, in place.
+   * Builds the external row value for a VARIANT column from a JSON string. Row-based encoding of
+   * VARIANT expects a [[VariantVal]] (`AgnosticEncoders.VariantEncoder`), so returning one here lets
+   * the row generator populate VARIANT anywhere in a schema — including nested inside structs,
+   * arrays and maps — with no post-processing pass over the DataFrame.
+   */
+  def makeVariant(json: String): Any = {
+    val variant = VariantBuilder.parseJson(json, /* allowDuplicateKeys = */ false)
+    new VariantVal(variant.getValue, variant.getMetadata)
+  }
+
+  /**
+   * Converts the named JSON-string columns of `df` into VARIANT columns, in place. Used to
+   * regenerate top-level VARIANT values for update batches, which are read back from parquet as
+   * already-typed VARIANT columns rather than built row by row.
    */
   def parseJsonColumns(df: DataFrame, columnNames: Seq[String]): DataFrame =
     columnNames.foldLeft(df)((acc, name) => acc.withColumn(name, expr(s"parse_json(`$name`)")))

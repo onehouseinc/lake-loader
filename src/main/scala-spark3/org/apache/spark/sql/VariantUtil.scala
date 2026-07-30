@@ -14,10 +14,12 @@
 
 package org.apache.spark.sql
 
+import org.apache.spark.sql.types.DataType
+
 /**
- * Spark 3.5 stub for the VARIANT touch points. Spark 3.5 has no `VariantType` and no `parse_json`,
- * and `iceberg-spark-runtime-3.5` ships no variant readers/writers, so VARIANT is unavailable on
- * this build — see the `scala-spark4` counterpart for the real implementation.
+ * Spark 3.5 stub for the VARIANT touch points. Spark 3.5 has no `VariantType`, no `VariantVal` and
+ * no `parse_json`, and `iceberg-spark-runtime-3.5` ships no variant readers/writers, so VARIANT is
+ * unavailable on this build — see the `scala-spark4` counterpart for the real implementation.
  */
 object VariantUtil {
 
@@ -30,6 +32,10 @@ object VariantUtil {
 
   /** Always fails on the Spark 3.5 build, where VARIANT is unavailable. */
   def requireSupported(): Unit = throw new UnsupportedOperationException(UNSUPPORTED_MESSAGE)
+
+  def variantType: DataType = throw new UnsupportedOperationException(UNSUPPORTED_MESSAGE)
+
+  def makeVariant(json: String): Any = throw new UnsupportedOperationException(UNSUPPORTED_MESSAGE)
 
   def parseJsonColumns(df: DataFrame, columnNames: Seq[String]): DataFrame = {
     if (columnNames.nonEmpty) requireSupported()

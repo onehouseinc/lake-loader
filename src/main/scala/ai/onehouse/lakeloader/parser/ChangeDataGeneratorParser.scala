@@ -93,6 +93,16 @@ object ChangeDataGeneratorParser {
           "Path to an Avro schema file (.avsc). When provided, data is generated matching this schema " +
             "instead of the default flat schema. The --number-columns parameter is ignored.")
 
+      opt[String]("spark-schema")
+        .action((x, c) => c.copy(sparkSchemaPath = Some(x)))
+        .text(
+          "Path to a file holding a Spark schema, given either as DDL "
+            + "('key STRING, payload VARIANT, nested STRUCT<a: VARIANT, b: INT>') or as Spark "
+            + "schema JSON (the output of StructType.json). Unlike --avro-schema this can declare "
+            + "VARIANT, anywhere in the record including nested inside structs/arrays/maps. "
+            + "'partition' and 'round' are appended automatically when absent. Requires the Spark 4 "
+            + "build if the schema uses VARIANT. --number-columns is ignored.")
+
       opt[Int]("num-variant-columns")
         .action((x, c) => c.copy(numVariantColumns = x))
         .validate(x =>
