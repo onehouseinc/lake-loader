@@ -15,14 +15,15 @@
 package ai.onehouse.lakeloader
 
 import ai.onehouse.lakeloader.ChangeDataGenerator.{genParallelRDD, COMPRESSION_RATIO_GUESS, PARTITION_PATH_FIELD_NAME, RECORD_KEY_FIELD_NAME}
-import ai.onehouse.lakeloader.configs.{DatagenConfig, KeyTypes, PartitionDistributionSpec, UpdatePatterns}
+import ai.onehouse.lakeloader.configs.{DatagenConfig, KeyTypes, PartitionDistributionSpec, UpdatePatterns, VariantSpec}
 import ai.onehouse.lakeloader.configs.KeyTypes.KeyType
 import ai.onehouse.lakeloader.configs.UpdatePatterns.{Uniform, UpdatePatterns, Zipf}
 import ai.onehouse.lakeloader.parser.ChangeDataGeneratorParser
-import ai.onehouse.lakeloader.utils.{AvroSchemaUtils, ComplexDataGenerator, MathUtils, StringUtils}
+import ai.onehouse.lakeloader.utils.{AvroSchemaUtils, ComplexDataGenerator, MathUtils, StringUtils, VariantJsonGenerator}
 import org.apache.hadoop.fs.Path
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.CatalystUtil.partitionLocalLimit
+import org.apache.spark.sql.VariantUtil
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.{DataFrame, Row, SaveMode, SparkSession}
@@ -49,7 +50,9 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
   import spark.implicits._
 
   // Currently only supports flat schema.
-  private def getSchema(numFields: Int = 10): StructType = {
+  private def getSchema(
+      numFields: Int = 10,
+      variantSpec: VariantSpec = VariantSpec.disabled): StructType = {
     // First 4 fields are fixed: primary key, partition key, round id, and timestamp.
     val fields = Seq(
       StructField("key", StringType, nullable = false),
@@ -70,8 +73,27 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
           case 9 => StructField(s"intField1$i", IntegerType, nullable = true)
         }
       })
-    StructType(fields)
+    // VARIANT columns are appended after the regular ones, declared as StringType so the generated
+    // Rows can carry JSON; `toVariantColumns` converts them to VARIANT on the built DataFrame.
+    val variantFields = VariantJsonGenerator
+      .variantColumnNames(numFields, variantSpec.numColumns)
+      .map(name => StructField(name, StringType, nullable = false))
+    StructType(fields ++ variantFields)
   }
+
+  /**
+   * Converts the JSON-string VARIANT placeholder columns of `df` into real VARIANT columns.
+   * No-op when no VARIANT columns were requested.
+   */
+  private def toVariantColumns(
+      df: DataFrame,
+      numColumns: Int,
+      variantSpec: VariantSpec): DataFrame =
+    if (!variantSpec.isEnabled) df
+    else
+      VariantUtil.parseJsonColumns(
+        df,
+        VariantJsonGenerator.variantColumnNames(numColumns, variantSpec.numColumns))
 
   private def generateNewRecord(
       round: Int,
@@ -79,7 +101,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       partitionPaths: List[String],
       partitionDistributionCDF: List[Double],
       keyType: KeyType,
-      schema: StructType) = {
+      schema: StructType,
+      variantSpec: VariantSpec = VariantSpec.disabled) = {
     ComplexDataGenerator.generateRow(
       schema,
       round,
@@ -87,7 +110,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       partitionDistributionCDF,
       keyType,
       size,
-      random)
+      random,
+      variantSpec)
   }
 
   /**
@@ -106,6 +130,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
    * @param startRound                     round to start generating from, default 0.
    * @param updatePatterns                 Update pattern for generating updates: random (uniform) or zipf (skewed).
    * @param numPartitionsToUpdate          Number of partitions to update (default -1/ none)
+   * @param variantSpec                    shape of the VARIANT columns to append (default: none).
+   *                                       Requires the Spark 4 build.
    */
   def generateWorkload(
       path: String,
@@ -122,7 +148,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       updatePatterns: UpdatePatterns = UpdatePatterns.Uniform,
       numPartitionsToUpdate: Int = -1,
       zipfianShape: Double = 2.93,
-      avroSchemaPath: Option[String] = None): Unit = {
+      avroSchemaPath: Option[String] = None,
+      variantSpec: VariantSpec = VariantSpec.disabled): Unit = {
     require(path.nonEmpty, "Path cannot be empty")
     require(
       totalPartitions != -1 || partitionDistributionMatrixOpt.isDefined,
@@ -135,6 +162,14 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     require(
       numPartitionsToUpdate <= totalPartitions,
       "The number of partitions to update should be lower than the total partitions")
+    require(
+      !variantSpec.isEnabled || avroSchemaPath.isEmpty,
+      "VARIANT columns cannot be combined with --avro-schema; Avro has no variant type. "
+        + "Either drop --num-variant-columns or declare the columns in the Avro schema instead.")
+    if (variantSpec.isEnabled) {
+      // Fail before generating anything rather than at write time.
+      VariantUtil.requireSupported()
+    }
 
     // Compute records distribution matrix across partitions; such matrix
     // could be explicitly provided as an optional parameter prescribing corresponding
@@ -147,7 +182,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       case Some(schemaPath) =>
         AvroSchemaUtils.loadSchemaFromAvscFile(schemaPath, spark.sparkContext.hadoopConfiguration)
       case None =>
-        getSchema(numColumns)
+        getSchema(numColumns, variantSpec)
     }
 
     // When a custom Avro schema is supplied, the user-provided --record-size is just a width hint
@@ -157,14 +192,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     // parquet (same format as the real output), we skip COMPRESSION_RATIO_GUESS for this path.
     val (effectiveRecordSize, effectiveCompressionRatio) = avroSchemaPath match {
       case Some(_) =>
-        val estimated = estimateRecordSize(
-          path,
-          schema,
-          partitionPaths,
-          recordSize,
-          keyType)
-        println(
-          s"""
+        val estimated = estimateRecordSize(path, schema, partitionPaths, recordSize, keyType)
+        println(s"""
              |$lineSepBold
              |Estimated record size from custom schema: $estimated bytes/record (compressed parquet avg over 100K sample rows).
              |Overriding --record-size=$recordSize for parallelism computation.
@@ -203,9 +232,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
         // strictly under the configured target (default 128 MB).
         val estimatedTotalBytes =
           targetRecords.toDouble * effectiveRecordSize * effectiveCompressionRatio
-        val targetParallelism = Math.max(
-          2,
-          Math.ceil(estimatedTotalBytes / targetDataFileSize).toInt)
+        val targetParallelism =
+          Math.max(2, Math.ceil(estimatedTotalBytes / targetDataFileSize).toInt)
 
         println(s"""
              |$lineSepBold
@@ -225,9 +253,12 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
               partitionPaths,
               partitionDistributionCDF,
               keyType,
-              schema))
+              schema,
+              variantSpec))
 
-        val insertsDF = spark.createDataFrame(insertsRDD, schema)
+        // Convert the JSON placeholders to VARIANT before the union, so both sides share the type
+        val insertsDF =
+          toVariantColumns(spark.createDataFrame(insertsRDD, schema), numColumns, variantSpec)
         val upsertDF =
           if (numUpdates == 0) insertsDF
           else
@@ -240,7 +271,11 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
                 path,
                 targetParallelism,
                 curRound,
-                zipfianShape))
+                zipfianShape,
+                numColumns,
+                variantSpec,
+                recordSize,
+                schema.fields.length))
 
         spark.time {
           upsertDF
@@ -322,6 +357,37 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     }
   }
 
+  /**
+   * Replaces the VARIANT columns of an update batch with freshly generated payloads. The rows are
+   * read back from previously written parquet, so the columns come in already typed as VARIANT; each
+   * is overwritten with a new JSON string and re-parsed. Without this, updates would rewrite byte
+   * identical variant values and understate the write cost.
+   */
+  private def regenerateVariantColumns(
+      df: DataFrame,
+      numColumns: Int,
+      variantSpec: VariantSpec,
+      recordSize: Int,
+      totalSchemaFields: Int): DataFrame = {
+    if (!variantSpec.isEnabled) {
+      return df
+    }
+
+    // Same per-field byte budget the insert path gives each column (see ComplexDataGenerator).
+    val sizeFactor = Math.max(recordSize / Math.max(totalSchemaFields, 1), 1)
+    val numKeys = variantSpec.numKeys
+    val nestingDepth = variantSpec.nestingDepth
+    // Seeded per row so the payload differs row to row while staying reproducible for a given run.
+    val jsonUdf = udf((seed: Long) =>
+      VariantJsonGenerator.generateJson(numKeys, nestingDepth, sizeFactor, new Random(seed)))
+
+    val variantColumns = VariantJsonGenerator.variantColumnNames(numColumns, variantSpec.numColumns)
+    val withJson = variantColumns.zipWithIndex.foldLeft(df) { case (acc, (name, idx)) =>
+      acc.withColumn(name, jsonUdf(monotonically_increasing_id() + lit(idx.toLong)))
+    }
+    VariantUtil.parseJsonColumns(withJson, variantColumns)
+  }
+
   ////////////////////////////////////////
   // Generating updates based on distribution type.
   ////////////////////////////////////////
@@ -333,7 +399,11 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       path: String,
       targetParallelism: Int,
       currentRound: Int,
-      zipfianShape: Double): DataFrame = {
+      zipfianShape: Double,
+      numColumns: Int,
+      variantSpec: VariantSpec,
+      recordSize: Int,
+      totalSchemaFields: Int): DataFrame = {
     val rawUpdatesDF = updatePatterns match {
       case Uniform =>
         getRandomlyDistributedUpdates(
@@ -358,11 +428,14 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     val updateSchema = rawUpdatesDF.schema
     // Regenerate all non-key scalar columns with new values so updates have different data.
     // Complex types (StructType, ArrayType, MapType) are left unchanged — sufficient for benchmarking.
-    val finalUpdatedDf = updateSchema.fields.foldLeft(rawUpdatesDF) { (df, field) =>
+    val scalarUpdatedDf = updateSchema.fields.foldLeft(rawUpdatesDF) { (df, field) =>
       field.name match {
         case "key" | "partition" => df
         case "round" => df.withColumn(field.name, lit(currentRound))
         case "ts" => df.withColumn(field.name, lit(newTs))
+        // VARIANT columns are regenerated separately below, since the new payload has to be built as
+        // a JSON string first and then re-parsed into VARIANT.
+        case name if name.startsWith(VariantJsonGenerator.VARIANT_FIELD_PREFIX) => df
         case _ =>
           field.dataType match {
             case StringType => df.withColumn(field.name, expr("uuid()"))
@@ -375,10 +448,18 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
             case TimestampType => df.withColumn(field.name, current_timestamp())
             case dt: DecimalType =>
               df.withColumn(field.name, (rand() * Math.pow(10, dt.precision - dt.scale)).cast(dt))
-            case _ => df // leave complex types (StructType, ArrayType, MapType, BinaryType) unchanged
+            case _ =>
+              df // leave complex types (StructType, ArrayType, MapType, BinaryType) unchanged
           }
       }
     }
+
+    val finalUpdatedDf = regenerateVariantColumns(
+      scalarUpdatedDf,
+      numColumns,
+      variantSpec,
+      recordSize,
+      totalSchemaFields)
 
     // NOTE: Applying this limit does not guarantee that exactly N elements will be contained in the
     //       returned dataset, since it might not be applying Spark's [[GlobalLimit]] operator.
@@ -599,7 +680,11 @@ object ChangeDataGenerator {
           updatePatterns = config.updatePattern,
           numPartitionsToUpdate = config.numPartitionsToUpdate,
           zipfianShape = config.zipfianShape,
-          avroSchemaPath = config.avroSchemaPath)
+          avroSchemaPath = config.avroSchemaPath,
+          variantSpec = VariantSpec(
+            numColumns = config.numVariantColumns,
+            numKeys = config.variantNumKeys,
+            nestingDepth = config.variantNestingDepth))
 
         spark.stop()
 

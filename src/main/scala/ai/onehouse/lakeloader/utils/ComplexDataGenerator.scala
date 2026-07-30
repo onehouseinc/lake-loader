@@ -14,7 +14,7 @@
 
 package ai.onehouse.lakeloader.utils
 
-import ai.onehouse.lakeloader.configs.KeyTypes
+import ai.onehouse.lakeloader.configs.{KeyTypes, VariantSpec}
 import ai.onehouse.lakeloader.configs.KeyTypes.KeyType
 import ai.onehouse.lakeloader.utils.MathUtils.sampleFromCDF
 import org.apache.spark.sql.Row
@@ -40,7 +40,8 @@ object ComplexDataGenerator extends Serializable {
       partitionDistributionCDF: List[Double],
       keyType: KeyType,
       recordSize: Int,
-      random: Random): Row = {
+      random: Random,
+      variantSpec: VariantSpec = VariantSpec.disabled): Row = {
     val ts = System.currentTimeMillis()
     val key = keyType match {
       case KeyTypes.TemporallyOrdered =>
@@ -58,6 +59,14 @@ object ComplexDataGenerator extends Serializable {
         case "partition" => partition
         case "round" => round
         case "ts" => ts
+        // VARIANT columns are generated as JSON strings here and converted to VARIANT with
+        // `parse_json` once the DataFrame is built (a Row cannot carry a VariantVal directly).
+        case name if name.startsWith(VariantJsonGenerator.VARIANT_FIELD_PREFIX) =>
+          VariantJsonGenerator.generateJson(
+            variantSpec.numKeys,
+            variantSpec.nestingDepth,
+            sizeFactor,
+            random)
         case _ => generateValue(field.dataType, field.nullable, sizeFactor, random)
       }
     }
@@ -72,7 +81,8 @@ object ComplexDataGenerator extends Serializable {
 
     dataType match {
       case StringType =>
-        StringUtils.generateRandomString(Math.max(sizeFactor + random.nextInt(Math.max(sizeFactor, 1)), 1))
+        StringUtils.generateRandomString(
+          Math.max(sizeFactor + random.nextInt(Math.max(sizeFactor, 1)), 1))
 
       case IntegerType =>
         random.nextInt()
@@ -109,12 +119,15 @@ object ComplexDataGenerator extends Serializable {
 
       case st: StructType =>
         val childSizeFactor = Math.max(sizeFactor / Math.max(st.fields.length, 1), 1)
-        Row.fromSeq(st.fields.map(f => generateValue(f.dataType, f.nullable, childSizeFactor, random)))
+        Row.fromSeq(
+          st.fields.map(f => generateValue(f.dataType, f.nullable, childSizeFactor, random)))
 
       case ArrayType(elementType, containsNull) =>
         val size = 1 + random.nextInt(4)
         val childSizeFactor = Math.max(sizeFactor / 4, 1)
-        (0 until size).map(_ => generateValue(elementType, containsNull, childSizeFactor, random)).toArray
+        (0 until size)
+          .map(_ => generateValue(elementType, containsNull, childSizeFactor, random))
+          .toArray
 
       case MapType(keyType, valueType, valueContainsNull) =>
         val size = 1 + random.nextInt(3)

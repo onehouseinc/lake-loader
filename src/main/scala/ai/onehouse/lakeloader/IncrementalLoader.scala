@@ -15,7 +15,7 @@ package ai.onehouse.lakeloader
  */
 
 import ai.onehouse.lakeloader.configs.MergeMode.{DeleteInsert, UpdateInsert}
-import ai.onehouse.lakeloader.configs.{ApiType, LoadConfig, MergeMode, OperationType, StorageFormat, WriteMode}
+import ai.onehouse.lakeloader.configs.{ApiType, IcebergFormatVersion, LoadConfig, MergeMode, OperationType, StorageFormat, WriteMode}
 import ai.onehouse.lakeloader.configs.StorageFormat.{Delta, Hudi, Iceberg, Parquet}
 import ai.onehouse.lakeloader.compaction.AsyncCompactionService
 import ai.onehouse.lakeloader.metrics.{MetricsCollector, RoundTiming}
@@ -29,6 +29,7 @@ import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
 import ai.onehouse.lakeloader.utils.SparkUtils.executeSparkSql
 import ai.onehouse.lakeloader.utils.StringUtils
 import ai.onehouse.lakeloader.utils.StringUtils.lineSepBold
+import ai.onehouse.lakeloader.utils.VariantJsonGenerator
 import ai.onehouse.lakeloader.ChangeDataGenerator.{PARTITION_PATH_FIELD_NAME, RECORD_KEY_FIELD_NAME}
 import ai.onehouse.lakeloader.IncrementalLoader.getTablePath
 import io.delta.tables.DeltaTable
@@ -47,18 +48,20 @@ class IncrementalLoader(
 
   val metricsCollector: MetricsCollector = new MetricsCollector()
 
-  private def tryCreateTable(schema: StructType,
-                             outputPath: String,
-                             format: StorageFormat,
-                             opts: Map[String, String],
-                             nonPartitioned: Boolean,
-                             scenarioId: String,
-                             writeMode: WriteMode = WriteMode.CopyOnWrite,
-                             roundNo: Int,
-                             asyncCompactionEnabled: Boolean = false,
-                             compactionTargetFileSize: Long = 120 * 1024 * 1024,
-                             recordKeyField: String = RECORD_KEY_FIELD_NAME,
-                             partitionPathField: String = PARTITION_PATH_FIELD_NAME): Unit = {
+  private def tryCreateTable(
+      schema: StructType,
+      outputPath: String,
+      format: StorageFormat,
+      opts: Map[String, String],
+      nonPartitioned: Boolean,
+      scenarioId: String,
+      writeMode: WriteMode = WriteMode.CopyOnWrite,
+      roundNo: Int,
+      asyncCompactionEnabled: Boolean = false,
+      compactionTargetFileSize: Long = 120 * 1024 * 1024,
+      icebergFormatVersion: Int = IcebergFormatVersion.V2,
+      recordKeyField: String = RECORD_KEY_FIELD_NAME,
+      partitionPathField: String = PARTITION_PATH_FIELD_NAME): Unit = {
 
     val tableName = format match {
       case Hudi => genHudiTableName(scenarioId)
@@ -86,7 +89,14 @@ class IncrementalLoader(
            |""".stripMargin
 
       case StorageFormat.Iceberg =>
-        val icebergTableProps = buildIcebergTableProperties(opts, writeMode, asyncCompactionEnabled, compactionTargetFileSize)
+        requireVariantSupport(schema, icebergFormatVersion)
+        val icebergTableProps =
+          buildIcebergTableProperties(
+            opts,
+            writeMode,
+            asyncCompactionEnabled,
+            compactionTargetFileSize,
+            icebergFormatVersion)
         s"""
            |CREATE TABLE IF NOT EXISTS $escapedTableName (
            |  ${schema.toDDL}
@@ -104,10 +114,28 @@ class IncrementalLoader(
     executeSparkSql(spark, createTableSql)
   }
 
+  /**
+   * VARIANT is an Iceberg v3 type, so a v2 table cannot hold it. Iceberg's own error for this is
+   * raised deep inside schema conversion, so check up front and name the flag to change.
+   */
+  private def requireVariantSupport(schema: StructType, icebergFormatVersion: Int): Unit = {
+    val variantColumns = schema.fields
+      .filter(_.dataType.typeName == VariantJsonGenerator.VARIANT_TYPE_NAME)
+      .map(_.name)
+
+    if (variantColumns.nonEmpty && icebergFormatVersion < IcebergFormatVersion.V3) {
+      throw new IllegalArgumentException(
+        s"Input schema has VARIANT column(s) ${variantColumns.mkString("[", ", ", "]")}, which "
+          + s"Iceberg only supports on table spec v3, but --iceberg-format-version is "
+          + s"$icebergFormatVersion. Pass --iceberg-format-version 3.")
+    }
+  }
+
   private def updateIcebergTable(scenarioId: String): Unit = {
     val tableName = genIcebergTableName(scenarioId)
     val escapedTableName = escapeTableName(tableName)
-    val updateQuery = s"ALTER TABLE $escapedTableName SET TBLPROPERTIES ('write.distribution-mode' = 'hash')"
+    val updateQuery =
+      s"ALTER TABLE $escapedTableName SET TBLPROPERTIES ('write.distribution-mode' = 'hash')"
     println("Running update query to reset write.distribution-mode - " + updateQuery)
 
     spark.sql(updateQuery)
@@ -117,8 +145,13 @@ class IncrementalLoader(
       userOpts: Map[String, String],
       writeMode: WriteMode,
       asyncCompactionEnabled: Boolean = false,
-      compactionTargetFileSize: Long = 120 * 1024 * 1024): String = {
+      compactionTargetFileSize: Long = 120 * 1024 * 1024,
+      icebergFormatVersion: Int = IcebergFormatVersion.V2): String = {
+    IcebergFormatVersion.validate(icebergFormatVersion)
     val writeModeStr = writeMode.asString
+
+    // Table spec version: v2 writes positional delete files on merge-on-read, v3 writes deletion vectors
+    val formatVersionProps = Map(IcebergFormatVersion.PROPERTY_KEY -> icebergFormatVersion.toString)
 
     // Build base write mode properties (deletion file type uses Iceberg defaults based on table spec version)
     val writeModeProps = Map(
@@ -134,14 +167,15 @@ class IncrementalLoader(
     }
 
     // Combine all properties, with user options taking precedence
-    val allProps = writeModeProps ++ fileSizeProps ++ userOpts
+    val allProps = formatVersionProps ++ writeModeProps ++ fileSizeProps ++ userOpts
     serializeOptionsForSql(allProps)
   }
 
-  private def dropTableIfExists(format: StorageFormat,
-                                escapedTableName: String,
-                                targetPathStr: String,
-                                roundNo: Int): Unit = {
+  private def dropTableIfExists(
+      format: StorageFormat,
+      escapedTableName: String,
+      targetPathStr: String,
+      roundNo: Int): Unit = {
     format match {
       case StorageFormat.Iceberg =>
         // Since Iceberg persists its catalog information w/in the manifest it's sufficient to just
@@ -181,79 +215,88 @@ class IncrementalLoader(
   }
 
   def doWrites(
-                inputPath: String,
-                outputPath: String,
-                format: StorageFormat = Parquet,
-                initialOperation: OperationType = OperationType.BulkInsert,
-                operation: OperationType = OperationType.Upsert,
-                apiType: ApiType = ApiType.SparkDatasourceApi,
-                initialOpts: Map[String, String] = Map(),
-                opts: Map[String, String] = Map(),
-                cacheInput: Boolean = false,
-                overwrite: Boolean = true,
-                nonPartitioned: Boolean = false,
-                experimentId: String = StringUtils.generateRandomString(10),
-                startRound: Int = 0,
-                mergeConditionColumns: Seq[String] = Seq(RECORD_KEY_FIELD_NAME, PARTITION_PATH_FIELD_NAME),
-                updateColumns: Seq[String] = Seq.empty,
-                mergeMode: MergeMode = MergeMode.UpdateInsert,
-                writeMode: WriteMode = WriteMode.CopyOnWrite,
-                asyncCompactionEnabled: Boolean = false,
-                compactionFrequencyCommits: Int = 3,
-                runFinalCompaction: Boolean = true,
-                maxRetries: Int = 5,
-                compactionMinFileSize: Long = 100 * 1024 * 1024,
-                compactionTargetFileSize: Long = 120 * 1024 * 1024,
-                deltaOptimizeWrite: Boolean = true,
-                recordKeyField: String = RECORD_KEY_FIELD_NAME,
-                partitionPathField: String = PARTITION_PATH_FIELD_NAME): Unit = {
+      inputPath: String,
+      outputPath: String,
+      format: StorageFormat = Parquet,
+      initialOperation: OperationType = OperationType.BulkInsert,
+      operation: OperationType = OperationType.Upsert,
+      apiType: ApiType = ApiType.SparkDatasourceApi,
+      initialOpts: Map[String, String] = Map(),
+      opts: Map[String, String] = Map(),
+      cacheInput: Boolean = false,
+      overwrite: Boolean = true,
+      nonPartitioned: Boolean = false,
+      experimentId: String = StringUtils.generateRandomString(10),
+      startRound: Int = 0,
+      mergeConditionColumns: Seq[String] = Seq(RECORD_KEY_FIELD_NAME, PARTITION_PATH_FIELD_NAME),
+      updateColumns: Seq[String] = Seq.empty,
+      mergeMode: MergeMode = MergeMode.UpdateInsert,
+      writeMode: WriteMode = WriteMode.CopyOnWrite,
+      icebergFormatVersion: Int = IcebergFormatVersion.V2,
+      asyncCompactionEnabled: Boolean = false,
+      compactionFrequencyCommits: Int = 3,
+      runFinalCompaction: Boolean = true,
+      maxRetries: Int = 5,
+      compactionMinFileSize: Long = 100 * 1024 * 1024,
+      compactionTargetFileSize: Long = 120 * 1024 * 1024,
+      deltaOptimizeWrite: Boolean = true,
+      recordKeyField: String = RECORD_KEY_FIELD_NAME,
+      partitionPathField: String = PARTITION_PATH_FIELD_NAME): Unit = {
     require(inputPath.nonEmpty, "Input path cannot be empty")
     require(outputPath.nonEmpty, "Output path cannot be empty")
 
     val compactionStatus =
-      if (asyncCompactionEnabled) s"ENABLED (every $compactionFrequencyCommits commits)" else "DISABLED"
+      if (asyncCompactionEnabled) s"ENABLED (every $compactionFrequencyCommits commits)"
+      else "DISABLED"
+    val formatDetails = format match {
+      case Iceberg =>
+        IcebergFormatVersion.validate(icebergFormatVersion)
+        s"\nIceberg spec: v$icebergFormatVersion (write mode: ${writeMode.asString})"
+      case _ => ""
+    }
     println(s"""
          |$lineSepBold
          |Executing $experimentId ($numRounds rounds)
-         |Async Compaction: $compactionStatus
+         |Async Compaction: $compactionStatus$formatDetails
          |$lineSepBold
          |""".stripMargin)
 
     // Determine table name and path for compaction
     val tableName = format match {
-      case Hudi    => genHudiTableName(experimentId)
+      case Hudi => genHudiTableName(experimentId)
       case Iceberg => genIcebergTableName(experimentId)
-      case Delta   => s"delta-$experimentId"
-      case _       => experimentId
+      case Delta => s"delta-$experimentId"
+      case _ => experimentId
     }
     val tablePath = getTablePath(outputPath, tableName)
 
-    val concurrencyOpts = if (writeMode == WriteMode.MergeOnRead && asyncCompactionEnabled && format == Hudi) {
-      // Base concurrency control options required for concurrent writes
-      Map(
-        "hoodie.write.concurrency.mode" -> "optimistic_concurrency_control",
-        "hoodie.clean.failed.writes.policy" -> "LAZY",
-        "hoodie.write.lock.provider" -> "org.apache.hudi.client.transaction.lock.InProcessLockProvider"
-      )
-    } else {
-      Map.empty[String, String]
-    }
+    val concurrencyOpts =
+      if (writeMode == WriteMode.MergeOnRead && asyncCompactionEnabled && format == Hudi) {
+        // Base concurrency control options required for concurrent writes
+        Map(
+          "hoodie.write.concurrency.mode" -> "optimistic_concurrency_control",
+          "hoodie.clean.failed.writes.policy" -> "LAZY",
+          "hoodie.write.lock.provider" -> "org.apache.hudi.client.transaction.lock.InProcessLockProvider")
+      } else {
+        Map.empty[String, String]
+      }
 
     if (concurrencyOpts.nonEmpty) {
       println(s"Injecting Hudi concurrency options: $concurrencyOpts")
     }
 
     // Configure Hudi options for async compaction
-    val compactionOpts = if (writeMode == WriteMode.MergeOnRead && asyncCompactionEnabled && format == Hudi) {
-      executeSparkSql(spark, "SET hoodie.compact.inline = false")
-      executeSparkSql(spark, "SET hoodie.compact.schedule.inline = true")
-      Map("hoodie.compact.inline" -> "false",
-        "hoodie.compact.schedule.inline" -> "true",
-        "hoodie.compact.inline.max.delta.commits" -> compactionFrequencyCommits.toString
-      )
-    } else {
-      Map.empty[String, String]
-    }
+    val compactionOpts =
+      if (writeMode == WriteMode.MergeOnRead && asyncCompactionEnabled && format == Hudi) {
+        executeSparkSql(spark, "SET hoodie.compact.inline = false")
+        executeSparkSql(spark, "SET hoodie.compact.schedule.inline = true")
+        Map(
+          "hoodie.compact.inline" -> "false",
+          "hoodie.compact.schedule.inline" -> "true",
+          "hoodie.compact.inline.max.delta.commits" -> compactionFrequencyCommits.toString)
+      } else {
+        Map.empty[String, String]
+      }
 
     if (compactionOpts.nonEmpty) {
       println(s"[Ingestion] Injecting Hudi concurrency options: $compactionOpts")
@@ -302,50 +345,51 @@ class IncrementalLoader(
           operation
         }
 
-      val rawDF =
-        spark.read
-          .format(ChangeDataGenerator.DEFAULT_DATA_GEN_FORMAT)
-          .load(s"$inputPath/$roundNo")
+        val rawDF =
+          spark.read
+            .format(ChangeDataGenerator.DEFAULT_DATA_GEN_FORMAT)
+            .load(s"$inputPath/$roundNo")
 
-      if (cacheInput) {
-        rawDF.cache()
-        println(s"Cached ${rawDF.count()} records from $inputPath")
-      }
+        if (cacheInput) {
+          rawDF.cache()
+          println(s"Cached ${rawDF.count()} records from $inputPath")
+        }
 
-      val targetOpts = if (roundNo == 0) {
-        initialOpts ++ compactionOpts
-      } else {
-        opts ++ compactionOpts
-      }
+        val targetOpts = if (roundNo == 0) {
+          initialOpts ++ compactionOpts
+        } else {
+          opts ++ compactionOpts
+        }
 
-      // Some formats (like Iceberg) require creating table in the Catalog
-      // before you are able to ingest data into it
-      if (roundNo == startRound && (apiType == ApiType.SparkSqlApi || format == StorageFormat.Iceberg)) {
-        tryCreateTable(
-          rawDF.schema,
-          outputPath,
-          format,
-          targetOpts ++ compactionOpts,
-          nonPartitioned,
-          experimentId,
-          writeMode,
-          roundNo,
-          asyncCompactionEnabled,
-          compactionTargetFileSize,
-          recordKeyField,
-          partitionPathField)
-      }
+        // Some formats (like Iceberg) require creating table in the Catalog
+        // before you are able to ingest data into it
+        if (roundNo == startRound && (apiType == ApiType.SparkSqlApi || format == StorageFormat.Iceberg)) {
+          tryCreateTable(
+            rawDF.schema,
+            outputPath,
+            format,
+            targetOpts ++ compactionOpts,
+            nonPartitioned,
+            experimentId,
+            writeMode,
+            roundNo,
+            asyncCompactionEnabled,
+            compactionTargetFileSize,
+            icebergFormatVersion,
+            recordKeyField,
+            partitionPathField)
+        }
 
-      // Want to reset the write distribution mode to hash after first commit for Iceberg
-      if (roundNo >= 1 && format == StorageFormat.Iceberg && !nonPartitioned) {
-        updateIcebergTable(experimentId)
-      }
+        // Want to reset the write distribution mode to hash after first commit for Iceberg
+        if (roundNo >= 1 && format == StorageFormat.Iceberg && !nonPartitioned) {
+          updateIcebergTable(experimentId)
+        }
 
-      val inputDF = if (nonPartitioned || roundNo != 0) {
-        rawDF
-      } else {
-        rawDF.sort(partitionPathField, recordKeyField)
-      }
+        val inputDF = if (nonPartitioned || roundNo != 0) {
+          rawDF
+        } else {
+          rawDF.sort(partitionPathField, recordKeyField)
+        }
 
         var attempt = 0
         var success = false
@@ -681,20 +725,22 @@ class IncrementalLoader(
           "Hudi sparkDataSourceApi does not support partial column updates.")
         require(
           mergeConditionColumns == (if (nonPartitioned) {
-            Seq(recordKeyField)
-          } else {
-            Seq(recordKeyField, partitionPathField)
-          }),
+                                      Seq(recordKeyField)
+                                    } else {
+                                      Seq(recordKeyField, partitionPathField)
+                                    }),
           s"Hudi sparkDataSourceApi does not support custom merge conditions: $mergeConditionColumns")
 
         val recordKeyAndPartitionOpts = if (nonPartitioned) {
           Map(DataSourceWriteOptions.RECORDKEY_FIELD.key() -> recordKeyField)
         } else {
-          Map(DataSourceWriteOptions.PARTITIONPATH_FIELD.key() -> partitionPathField,
+          Map(
+            DataSourceWriteOptions.PARTITIONPATH_FIELD.key() -> partitionPathField,
             DataSourceWriteOptions.RECORDKEY_FIELD.key() -> recordKeyField)
         }
 
-        val targetOpts = opts ++ recordKeyAndPartitionOpts ++ Map(HoodieWriteConfig.TBL_NAME.key() -> "hudi")
+        val targetOpts =
+          opts ++ recordKeyAndPartitionOpts ++ Map(HoodieWriteConfig.TBL_NAME.key() -> "hudi")
 
         df.write
           .format("hudi")
@@ -772,7 +818,8 @@ object IncrementalLoader {
         val apiType = ApiType.fromString(config.apiType)
 
         if (apiType == ApiType.SparkSqlApi && format != StorageFormat.Hudi) {
-          System.err.println(s"Error: --api-type spark-sql is only supported with --format hudi. Got: --format ${config.format}")
+          System.err.println(
+            s"Error: --api-type spark-sql is only supported with --format hudi. Got: --format ${config.format}")
           sys.exit(1)
         }
 
@@ -798,6 +845,7 @@ object IncrementalLoader {
           updateColumns = config.updateColumns,
           mergeMode = MergeMode.fromString(config.mergeMode),
           writeMode = WriteMode.fromString(config.writeMode),
+          icebergFormatVersion = config.icebergFormatVersion,
           asyncCompactionEnabled = config.asyncCompactionEnabled,
           compactionFrequencyCommits = config.compactionFrequencyCommits,
           runFinalCompaction = config.runFinalCompaction,

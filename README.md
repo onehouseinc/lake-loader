@@ -14,9 +14,15 @@ The tool consists of two main components:
 
 ### Building
 
-Lake loader is built with Java 11 or 17 using Maven.
+Lake loader targets **Spark 4.0 / Scala 2.13 / Java 17** by default:
 
-Run `mvn clean package` to build.
+```bash
+mvn clean package             # Spark 4.0, Scala 2.13, Java 17  (default)
+mvn -Pspark3 clean package    # Spark 3.5, Scala 2.12, Java 11
+```
+
+The default moved to Spark 4.0 because both Iceberg 1.11.0 and the VARIANT type require it — see
+[Engine Compatibility](#engine-compatibility).
 
 ### Formatting
 
@@ -24,7 +30,18 @@ Run `mvn scalafmt:format` to apply scala formatting.
 
 ### Engine Compatibility
 
-Lake loader requires spark to generate and load the dataset, compatible with spark3.x including spark3.5
+Lake loader requires Spark to generate and load the dataset. Two builds are published from this repo:
+
+| Build | Spark | Scala | Cluster Java | Iceberg | Delta | VARIANT |
+|-------|-------|-------|--------------|---------|-------|---------|
+| default (`mvn package`)  | 4.0.0 | 2.13 | 17 | 1.11.0 | 4.0.0 | yes |
+| `-Pspark3`               | 3.5.3 | 2.12 | 17 (see below) | 1.11.0 | 3.3.2 | **no** |
+
+Things to know before picking a build:
+
+* **Iceberg 1.11.0 jars are compiled for Java 17** (1.9.0 was Java 11). Writing Iceberg tables requires the Spark cluster — driver *and* executors — to run on Java 17, on both builds. Spark 3.5 itself runs on Java 11, so the `-Pspark3` build only needs Java 17 when the target format is Iceberg.
+* **VARIANT is Spark 4 only.** Spark 3.5 has no `VariantType`, and `iceberg-spark-runtime-3.5` ships no variant readers or writers. On the `-Pspark3` build, `--num-variant-columns` fails fast with a message telling you to rebuild; see [VARIANT Columns](#variant-columns).
+* Both builds run the same code except for a small set of Spark-internal touch points under `src/main/scala-spark3` / `src/main/scala-spark4` (`CatalystUtil`, `VariantUtil`).
 
 ## Component Overview
 
@@ -59,7 +76,8 @@ def generateWorkload(
   primaryKeyType: KeyType = KeyType.Random,
   updatePatterns: UpdatePatterns = UpdatePatterns.Uniform,
   numPartitionsToUpdate: Int = -1,
-  zipfianShape: Double = 2.93
+  zipfianShape: Double = 2.93,
+  variantSpec: VariantSpec = VariantSpec.disabled
 )
 ```
 
@@ -87,6 +105,9 @@ spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator <jar-file> [opti
 | numPartitionsToUpdate | `--num-partitions-to-update`           | Int            | -1         | Number of partitions to update (-1 for all)                     |
 | zipfianShape          | `--zipfian-shape`                      | Double         | 2.93       | Shape parameter for Zipf distribution (higher = more skewed)    |
 | partitionDistribution | `--partition-distribution`             | String         | uniform    | Leading per-partition insert weights, zero-padded up to `--total-partitions`. Each segment must sum to 1.0. Use `;` to give round 0 a different distribution than rounds 1+ (e.g. `;0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1` → round 0 uniform, rounds 1+ concentrated in first 10 partitions). An empty segment = uniform across all partitions for that batch. |
+| numVariantColumns     | `--num-variant-columns`                | Int            | 0          | Number of VARIANT columns to append after the regular columns. Spark 4 build only |
+| variantNumKeys        | `--variant-num-keys`                   | Int            | 8          | Keys per level in the generated VARIANT JSON object             |
+| variantNestingDepth   | `--variant-nesting-depth`              | Int            | 1          | Nesting depth of the generated VARIANT JSON object (1 = flat)   |
 
 **Notes**:
 * **Record count specification**: `--number-records-per-round` accepts a comma-separated list of record counts (e.g., `22000000,22000` for a large initial load followed by smaller incremental rounds). A single value applies uniformly to all rounds. If fewer values are provided than the number of rounds, the last value is repeated for remaining rounds.
@@ -119,6 +140,7 @@ def doWrites(
   mergeMode: MergeMode = MergeMode.UpdateInsert,
   updateColumns: Seq[String] = Seq.empty,
   writeMode: WriteMode = WriteMode.CopyOnWrite,
+  icebergFormatVersion: Int = 2,
   asyncCompactionEnabled: Boolean = false,
   compactionFrequencyCommits: Int = 3,
   runFinalCompaction: Boolean = true,
@@ -155,6 +177,7 @@ spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> [option
 | mergeMode             | `--merge-mode`                         | MergeMode          | update-insert    | Merge mode: `update-insert`, `delete-insert`              |
 | updateColumns         | `--update-columns`                     | Seq[String]        | []               | Specific columns to update (empty = all columns)          |
 | writeMode             | `--write-mode`                         | WriteMode          | copy-on-write    | Write mode: `copy-on-write`, `merge-on-read`              |
+| icebergFormatVersion  | `--iceberg-format-version`             | Int                | 2                | Iceberg table spec version (`format-version`): `2`, `3`. Iceberg only |
 | asyncCompactionEnabled | `--async-compaction`                  | Boolean            | false            | Enable async background compaction                        |
 | compactionFrequencyCommits | `--compaction-frequency-commits`  | Int                | 3                | Schedule compaction every N commits                       |
 | runFinalCompaction    | `--run-final-compaction`               | Boolean            | true             | Run final compaction on shutdown                          |
@@ -170,6 +193,112 @@ spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> [option
   * **Hudi**: Sets table type to `cow` (Copy-On-Write) or `mor` (Merge-On-Read)
   * **Delta**: Enables deletion vectors when set to `merge-on-read`
   * **Iceberg**: Sets `write.delete.mode`, `write.update.mode`, and `write.merge.mode` properties
+
+### Iceberg Table Spec Version (v2 / v3)
+
+The loader creates Iceberg tables with an explicit `format-version` table property, controlled by `--iceberg-format-version`. Iceberg's own default is `2`, which is also the loader's default.
+
+| `--iceberg-format-version` | `--write-mode merge-on-read` writes | `--write-mode copy-on-write` writes |
+|----------------------------|-------------------------------------|-------------------------------------|
+| `2`                        | Positional delete files             | Rewritten data files                |
+| `3`                        | Deletion vectors (Puffin)           | Rewritten data files                |
+
+Notes:
+* The delete file type is not configured directly — Iceberg picks it from the table spec version, so v3 + `merge-on-read` is what produces deletion vectors.
+* `format-version` is only applied at `CREATE TABLE` time, i.e. on the round that creates the table (`--start-round 0`, or the first round of a fresh table). Resuming into an existing table leaves its spec version untouched.
+* v3 tables carry row lineage (`_row_id`, `_last_updated_sequence_number`), which Iceberg maintains automatically.
+* This option applies to `--format iceberg` only and is ignored by the other formats.
+* Requires an Iceberg runtime that supports spec v3 — this project builds against Iceberg 1.11.0.
+
+**Example — Iceberg v3 merge-on-read with async compaction:**
+```bash
+spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> \
+  --input-path s3a://input/data \
+  --output-path s3a://output/table \
+  --format iceberg \
+  --iceberg-format-version 3 \
+  --write-mode merge-on-read \
+  --async-compaction true \
+  --compaction-frequency-commits 5
+```
+
+**Scala API:**
+```scala
+loader.doWrites(
+  inputPath,
+  outputPath,
+  format = StorageFormat.Iceberg,
+  writeMode = WriteMode.MergeOnRead,
+  icebergFormatVersion = 3,
+  asyncCompactionEnabled = true,
+  compactionFrequencyCommits = 5
+)
+```
+
+For a v3 merge-on-read table, `rewrite_data_files` (used by async compaction) also rewrites data files whose deletion vectors cover at least 30% of their rows — Iceberg's `delete-ratio-threshold` default.
+
+### VARIANT Columns
+
+The data generator can append VARIANT columns holding generated JSON objects, for benchmarking semi-structured ingest.
+
+**Requirements** — both, or the run fails fast:
+* The **Spark 4 build** (the default). Spark 3.5 has no `VariantType` and `iceberg-spark-runtime-3.5` has no variant support, so on a `-Pspark3` jar `--num-variant-columns` throws with a message telling you to rebuild.
+* For Iceberg targets, **`--iceberg-format-version 3`** — VARIANT is a v3 spec type. Loading variant input into a v2 table is rejected up front, naming the flag to change.
+
+**Configuration:**
+* `--num-variant-columns`: number of VARIANT columns, appended after the `--number-columns` regular columns and named `variantField<n>` (default: `0`, i.e. off)
+* `--variant-num-keys`: keys per JSON object level (default: `8`)
+* `--variant-nesting-depth`: object nesting depth, `1` meaning a flat object (default: `1`)
+
+The payload keeps a **stable shape** across records — same keys, same value types at the same paths — while leaf values are randomized. That is what makes the data representative of real semi-structured columns and what lets engines shred it; randomizing the keys instead would just measure metadata blowup. At each level the keys are `k0..k<numKeys-1>` with value types rotating through string / long / double / boolean / array, and when nesting budget remains the last key holds a nested object. String leaves absorb the per-column byte budget derived from `--record-size`.
+
+With `--variant-num-keys 6 --variant-nesting-depth 2`:
+```json
+{"k0":"aQ3...","k1":-849148183811007174,"k2":0.317,"k3":true,
+ "k4":["x9..","p2..","k7.."],"k5":{"k0":"..","k1":-732543189,"k2":0.88,"k3":false,"k4":[".."],"k5":".."}}
+```
+
+VARIANT columns cannot be combined with `--avro-schema` (Avro has no variant type); that combination is rejected.
+
+**Generate, then load into an Iceberg v3 MOR table:**
+```bash
+# 1. generate data with 2 VARIANT columns
+spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator <jar-file> \
+  --path s3a://input/data \
+  --number-columns 40 \
+  --num-variant-columns 2 \
+  --variant-num-keys 8 \
+  --variant-nesting-depth 2 \
+  --total-partitions 365
+
+# 2. load it — v3 is required for VARIANT
+spark-submit --class ai.onehouse.lakeloader.IncrementalLoader <jar-file> \
+  --input-path s3a://input/data \
+  --output-path s3a://output/table \
+  --format iceberg \
+  --iceberg-format-version 3 \
+  --write-mode merge-on-read
+```
+
+**Scala API:**
+```scala
+datagen.generateWorkload(
+  inputPath,
+  numColumns = 40,
+  totalPartitions = 365,
+  variantSpec = VariantSpec(numColumns = 2, numKeys = 8, nestingDepth = 2)
+)
+
+loader.doWrites(
+  inputPath,
+  outputPath,
+  format = StorageFormat.Iceberg,
+  writeMode = WriteMode.MergeOnRead,
+  icebergFormatVersion = 3
+)
+```
+
+Query the loaded data with Spark's variant functions, e.g. `variant_get(variantField40, '$.k5.k1', 'bigint')`, `to_json(variantField40)`, or `schema_of_variant(variantField40)`.
 
 ### Async Compaction
 
@@ -410,7 +539,12 @@ This section shows how to use the IncrementalLoader component to load the genera
 **NOTE**: Examples below use Scala API in spark-shell. For CLI usage with spark-submit, use the class name `ai.onehouse.lakeloader.IncrementalLoader` and refer to the parameter table above for command-line flags.
 
 #### EMR
-Provision a cluster with the latest EMR version 7.5.0. 
+Provision a cluster with the latest EMR version 7.5.0.
+
+**NOTE**: EMR's bundled `iceberg-spark3-runtime.jar` is an older Iceberg build. To write table spec v3
+or VARIANT you must supply `iceberg-spark-runtime-4.0_2.13:1.11.0` yourself (on a Spark 4.0 / Java 17
+cluster) rather than relying on the bundled jar.
+
 Using the spark-shell, you need to configure the following additional configs besides the typical spark configs:
 ```
   --jars /usr/share/aws/iceberg/lib/iceberg-spark3-runtime.jar

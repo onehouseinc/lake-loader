@@ -33,7 +33,31 @@ case class DatagenConfig(
     numPartitionsToUpdate: Int = -1,
     zipfianShape: Double = 2.93,
     avroSchemaPath: Option[String] = None,
-    partitionDistribution: Option[PartitionDistributionSpec] = None)
+    partitionDistribution: Option[PartitionDistributionSpec] = None,
+    numVariantColumns: Int = 0,
+    variantNumKeys: Int = 8,
+    variantNestingDepth: Int = 1)
+
+/**
+ * Shape of the generated VARIANT columns.
+ *
+ * @param numColumns    number of VARIANT columns appended after the regular columns
+ * @param numKeys       number of keys in each JSON object level
+ * @param nestingDepth  JSON object nesting depth; 1 means a flat object
+ */
+case class VariantSpec(numColumns: Int = 0, numKeys: Int = 8, nestingDepth: Int = 1) {
+  require(numColumns >= 0, s"Number of variant columns cannot be negative, got $numColumns")
+  require(numColumns == 0 || numKeys >= 1, s"Variant columns need at least 1 key, got $numKeys")
+  require(
+    numColumns == 0 || nestingDepth >= 1,
+    s"Variant nesting depth must be at least 1, got $nestingDepth")
+
+  def isEnabled: Boolean = numColumns > 0
+}
+
+object VariantSpec {
+  val disabled: VariantSpec = VariantSpec()
+}
 
 /**
  * Per-round split for the CLI partition distribution flag.
