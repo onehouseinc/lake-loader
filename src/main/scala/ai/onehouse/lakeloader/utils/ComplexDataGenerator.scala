@@ -28,6 +28,7 @@ import scala.util.Random
 object ComplexDataGenerator extends Serializable {
 
   private val NULL_PROBABILITY = 0.2
+  private val COLLECTION_NULL_PROBABILITY = 0.4
 
   /**
    * Generate a Row for the given schema, with special handling for the standard
@@ -68,7 +69,22 @@ object ComplexDataGenerator extends Serializable {
    * Recursively generate a random value for the given Spark DataType.
    */
   def generateValue(dataType: DataType, nullable: Boolean, sizeFactor: Int, random: Random): Any = {
-    if (nullable && random.nextDouble() < NULL_PROBABILITY) return null
+    val nullProbability = dataType match {
+      case ArrayType(_, _) | MapType(_, _, _) => COLLECTION_NULL_PROBABILITY
+      case _ => NULL_PROBABILITY
+    }
+    if (nullable && random.nextDouble() < nullProbability) {
+      // Arrays/maps: emit an empty collection rather than null. A null container here (as
+      // opposed to a genuinely absent/optional leaf value) triggered a parquet-avro schema
+      // mismatch during Hudi upserts (ClassCastException: "... is not a group") when merging
+      // update-round files against bootstrap-round files -- an empty collection still carries
+      // the full nested Avro/Parquet schema for the field, so readers never disagree on its type.
+      return dataType match {
+        case ArrayType(_, _) => Array.empty[Any]
+        case MapType(_, _, _) => Map.empty[Any, Any]
+        case _ => null
+      }
+    }
 
     dataType match {
       case StringType =>
