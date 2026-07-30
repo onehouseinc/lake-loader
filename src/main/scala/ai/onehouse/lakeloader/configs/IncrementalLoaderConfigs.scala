@@ -110,7 +110,7 @@ object ApiType {
   case object SparkDatasourceApi extends ApiType { val asString = "spark-datasource" }
   case object SparkSqlApi extends ApiType { val asString = "spark-sql" }
 
-  def fromString(s : String): ApiType = s match {
+  def fromString(s: String): ApiType = s match {
     case "spark-datasource" => SparkDatasourceApi
     case "spark-sql" => SparkSqlApi
     case _ => throw new IllegalArgumentException(s"Invalid ApiType: $s")
@@ -134,6 +134,25 @@ sealed trait WriteMode {
   def asString: String
   def asHudiSqlWriteTableType: String
   def asHudiDatasourceWriteTableType: String
+}
+
+/**
+ * Iceberg table spec version (`format-version` table property). v2 uses positional delete files
+ * for merge-on-read writes, v3 uses deletion vectors.
+ */
+object IcebergFormatVersion {
+  val V2: Int = 2
+  val V3: Int = 3
+
+  val PROPERTY_KEY: String = "format-version"
+
+  def values(): List[Int] = List(V2, V3)
+
+  def validate(v: Int): Unit =
+    if (!values().contains(v)) {
+      throw new IllegalArgumentException(
+        s"Invalid Iceberg format version: $v. Valid values: ${values().mkString(", ")}")
+    }
 }
 
 object WriteMode {
@@ -168,30 +187,31 @@ object WriteMode {
 }
 
 case class LoadConfig(
-                       numberOfRounds: Int = 10,
-                       inputPath: String = "",
-                       outputPath: String = "",
-                       format: String = "hudi",
-                       initialOperationType: String = "bulk_insert",
-                       operationType: String = "upsert",
-                       apiType: String = "spark-datasource",
-                       initialOptions: Map[String, String] = Map.empty,
-                       options: Map[String, String] = Map.empty,
-                       nonPartitioned: Boolean = false,
-                       experimentId: String = StringUtils.generateRandomString(10),
-                       startRound: Int = 0,
-                       catalog: String = "spark_catalog",
-                       database: String = "default",
-                       mergeMode: String = "update-insert",
-                       additionalMergeConditionColumns: Seq[String] = Seq.empty,
-                       updateColumns: Seq[String] = Seq.empty,
-                       writeMode: String = "copy-on-write",
-                       asyncCompactionEnabled: Boolean = false,
-                       compactionFrequencyCommits: Int = 3,
-                       runFinalCompaction: Boolean = true,
-                       maxRetries: Int = 5,
-                       compactionMinFileSize: Long = 100 * 1024 * 1024,
-                       compactionTargetFileSize: Long = 120 * 1024 * 1024,
-                       deltaOptimizeWrite: Boolean = true,
-                       recordKeyField: String = "key",
-                       partitionPathField: String = "partition")
+    numberOfRounds: Int = 10,
+    inputPath: String = "",
+    outputPath: String = "",
+    format: String = "hudi",
+    initialOperationType: String = "bulk_insert",
+    operationType: String = "upsert",
+    apiType: String = "spark-datasource",
+    initialOptions: Map[String, String] = Map.empty,
+    options: Map[String, String] = Map.empty,
+    nonPartitioned: Boolean = false,
+    experimentId: String = StringUtils.generateRandomString(10),
+    startRound: Int = 0,
+    catalog: String = "spark_catalog",
+    database: String = "default",
+    mergeMode: String = "update-insert",
+    additionalMergeConditionColumns: Seq[String] = Seq.empty,
+    updateColumns: Seq[String] = Seq.empty,
+    writeMode: String = "copy-on-write",
+    icebergFormatVersion: Int = IcebergFormatVersion.V2,
+    asyncCompactionEnabled: Boolean = false,
+    compactionFrequencyCommits: Int = 3,
+    runFinalCompaction: Boolean = true,
+    maxRetries: Int = 5,
+    compactionMinFileSize: Long = 100 * 1024 * 1024,
+    compactionTargetFileSize: Long = 120 * 1024 * 1024,
+    deltaOptimizeWrite: Boolean = true,
+    recordKeyField: String = "key",
+    partitionPathField: String = "partition")

@@ -78,18 +78,18 @@ object AvroSchemaUtils {
       (schema.getType == UNION && schema.getTypes.asScala.exists(_.getType == NULL))
 
   private def avroToSparkType(schema: Schema): DataType = schema.getType match {
-    case STRING  => StringType
+    case STRING => StringType
     case BOOLEAN => BooleanType
-    case FLOAT   => FloatType
-    case DOUBLE  => DoubleType
-    case BYTES   => BinaryType
-    case NULL    => NullType
-    case ENUM    => StringType
+    case FLOAT => FloatType
+    case DOUBLE => DoubleType
+    case BYTES => BinaryType
+    case NULL => NullType
+    case ENUM => StringType
 
     case INT =>
       Option(schema.getLogicalType) match {
         case Some(lt) if lt.getName == "date" => DateType
-        case _                                => IntegerType
+        case _ => IntegerType
       }
 
     case LONG =>
@@ -106,14 +106,17 @@ object AvroSchemaUtils {
     case FIXED =>
       Option(schema.getLogicalType) match {
         case Some(lt: LogicalTypes.Decimal) => DecimalType(lt.getPrecision, lt.getScale)
-        case _                              => BinaryType
+        case _ => BinaryType
       }
 
     case RECORD =>
       val fields = schema.getFields.asScala.map { field =>
-        StructField(field.name(), avroToSparkType(field.schema()), nullable = isNullable(field.schema()))
+        StructField(
+          field.name(),
+          avroToSparkType(field.schema()),
+          nullable = isNullable(field.schema()))
       }
-      StructType(fields)
+      StructType(fields.toSeq)
 
     case ARRAY =>
       ArrayType(

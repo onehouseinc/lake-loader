@@ -14,7 +14,7 @@
 
 package ai.onehouse.lakeloader.parser
 
-import ai.onehouse.lakeloader.configs.{ApiType, LoadConfig, MergeMode, OperationType, StorageFormat, WriteMode}
+import ai.onehouse.lakeloader.configs.{ApiType, IcebergFormatVersion, LoadConfig, MergeMode, OperationType, StorageFormat, WriteMode}
 
 object IncrementalLoaderParser {
 
@@ -101,6 +101,17 @@ object IncrementalLoaderParser {
       .text(
         s"Write mode for updates/deletes. Applies to Hudi (table type), Delta (deletion vectors), and Iceberg. Options: ${WriteMode.values().mkString(", ")}. Default: copy-on-write")
 
+    opt[Int]("iceberg-format-version")
+      .action((x, c) => c.copy(icebergFormatVersion = x))
+      .validate(x =>
+        if (IcebergFormatVersion.values().contains(x)) success
+        else
+          failure(
+            s"Invalid Iceberg format version: $x. Valid values: ${IcebergFormatVersion.values().mkString(", ")}"))
+      .text(s"Iceberg table spec version ('format-version' table property), applies to --format iceberg only. "
+        + s"v2 writes positional delete files for merge-on-read, v3 writes deletion vectors. "
+        + s"Options: ${IcebergFormatVersion.values().mkString(", ")}. Default: ${IcebergFormatVersion.V2}")
+
     opt[Boolean]("async-compaction")
       .action((x, c) => c.copy(asyncCompactionEnabled = x))
       .text("Enable async background compaction. Default: false")
@@ -119,7 +130,8 @@ object IncrementalLoaderParser {
 
     opt[Long]("compaction-min-file-size")
       .action((x, c) => c.copy(compactionMinFileSize = x))
-      .text("Files smaller than this threshold (in bytes) will be grouped and rewritten by compaction. Default: 104857600 (100MB)")
+      .text(
+        "Files smaller than this threshold (in bytes) will be grouped and rewritten by compaction. Default: 104857600 (100MB)")
 
     opt[Long]("compaction-target-file-size")
       .action((x, c) => c.copy(compactionTargetFileSize = x))
@@ -127,7 +139,8 @@ object IncrementalLoaderParser {
 
     opt[Boolean]("delta-optimize-write")
       .action((x, c) => c.copy(deltaOptimizeWrite = x))
-      .text("Enable optimized writes for Delta Lake merge operations on partitioned tables. Balances data distribution to avoid skewed large files. Default: true")
+      .text(
+        "Enable optimized writes for Delta Lake merge operations on partitioned tables. Balances data distribution to avoid skewed large files. Default: true")
 
     opt[String]("record-key-field")
       .action((x, c) => c.copy(recordKeyField = x))

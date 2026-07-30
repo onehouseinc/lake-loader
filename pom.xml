@@ -36,17 +36,26 @@
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven-compiler-plugin.version>3.11.0</maven-compiler-plugin.version>
-    <maven.compiler.release>11</maven.compiler.release>
+    <maven.compiler.release>17</maven.compiler.release>
     <maven-jar-plugin.version>2.6</maven-jar-plugin.version>
     <maven-surefire-plugin.version>2.19.1</maven-surefire-plugin.version>
     <maven-shade-plugin.version>3.1.1</maven-shade-plugin.version>
     <log4j.version>1.2.17</log4j.version>
-    <spark.version>3.5.3</spark.version>
-    <scala.version>2.12.10</scala.version>
-    <scala.libversion>2.12</scala.libversion>
-    <hudi.version>1.1.1</hudi.version>
-    <iceberg.version>1.9.0</iceberg.version>
-    <delta.version>3.3.2</delta.version>
+    <!-- Spark/Scala coordinates. Defaults target Spark 4.0 / Scala 2.13 (requires Java 17), which is
+         what Iceberg 1.11.0 and the VARIANT type need.
+         Activate the `spark3` profile (-Pspark3) to build for Spark 3.5 / Scala 2.12. -->
+    <spark.version>4.0.0</spark.version>
+    <spark.binary.version>4.0</spark.binary.version>
+    <!-- Version-specific sources for classes that touch Spark internals (see CatalystUtil, VariantUtil).
+         Overridden to scala-spark3 by the `spark3` profile. -->
+    <spark.variant.srcdir>${project.basedir}/src/main/scala-spark4</spark.variant.srcdir>
+    <build-helper-maven-plugin.version>3.6.0</build-helper-maven-plugin.version>
+    <scala.version>2.13.16</scala.version>
+    <scala.binary.version>2.13</scala.binary.version>
+    <hudi.version>1.2.0</hudi.version>
+    <iceberg.version>1.11.0</iceberg.version>
+    <!-- Delta 4.0.x is the Spark 4.0 line; 4.1.0+ requires Spark 4.1 -->
+    <delta.version>4.0.1</delta.version>
     <scopt.version>4.1.0</scopt.version>
     <scalafmt-maven-plugin.version>1.1.1640084764.9f463a9</scalafmt-maven-plugin.version>
     <scalatest.version>3.2.19</scalatest.version>
@@ -70,7 +79,7 @@
                 <includes>
                   <include>com.beust:jcommander</include>
                   <include>log4j:log4j</include>
-                  <include>com.github.scopt:scopt_2.12</include>
+                  <include>com.github.scopt:scopt_${scala.binary.version}</include>
                 </includes>
               </artifactSet>
               <filters>
@@ -88,6 +97,25 @@
                 </filter>
               </filters>
               <finalName>${project.artifactId}-${project.version}</finalName>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <version>${build-helper-maven-plugin.version}</version>
+        <executions>
+          <execution>
+            <id>add-spark-variant-source</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>add-source</goal>
+            </goals>
+            <configuration>
+              <sources>
+                <source>${spark.variant.srcdir}</source>
+              </sources>
             </configuration>
           </execution>
         </executions>
@@ -183,12 +211,12 @@
     </dependency>
     <dependency>
       <groupId>com.github.scopt</groupId>
-      <artifactId>scopt_2.12</artifactId>
+      <artifactId>scopt_${scala.binary.version}</artifactId>
       <version>${scopt.version}</version>
     </dependency>
     <dependency>
       <groupId>org.apache.hudi</groupId>
-      <artifactId>hudi-spark3.5-bundle_2.12</artifactId>
+      <artifactId>hudi-spark${spark.binary.version}-bundle_${scala.binary.version}</artifactId>
       <version>${hudi.version}</version>
       <scope>provided</scope>
     </dependency>
@@ -200,31 +228,25 @@
     </dependency>
     <dependency>
       <groupId>org.apache.iceberg</groupId>
-      <artifactId>iceberg-spark-runtime-3.5_2.12</artifactId>
+      <artifactId>iceberg-spark-runtime-${spark.binary.version}_${scala.binary.version}</artifactId>
       <version>${iceberg.version}</version>
       <scope>provided</scope>
     </dependency>
     <dependency>
-      <groupId>org.apache.hudi</groupId>
-      <artifactId>hudi-utilities_2.12</artifactId>
-      <version>${hudi.version}</version>
-      <scope>provided</scope>
-    </dependency>
-    <dependency>
       <groupId>org.apache.spark</groupId>
-      <artifactId>spark-core_2.12</artifactId>
+      <artifactId>spark-core_${scala.binary.version}</artifactId>
       <version>${spark.version}</version>
       <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.spark</groupId>
-      <artifactId>spark-sql_2.12</artifactId>
+      <artifactId>spark-sql_${scala.binary.version}</artifactId>
       <version>${spark.version}</version>
       <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>io.delta</groupId>
-      <artifactId>delta-spark_2.12</artifactId>
+      <artifactId>delta-spark_${scala.binary.version}</artifactId>
       <version>${delta.version}</version>
       <scope>provided</scope>
     </dependency>
@@ -235,7 +257,7 @@
     </dependency>
     <dependency>
       <groupId>org.scalatest</groupId>
-      <artifactId>scalatest_${scala.libversion}</artifactId>
+      <artifactId>scalatest_${scala.binary.version}</artifactId>
       <version>${scalatest.version}</version>
       <scope>test</scope>
     </dependency>
@@ -247,4 +269,25 @@
       <url>https://packages.confluent.io/maven/</url>
     </repository>
   </repositories>
+
+  <profiles>
+    <!-- Build against Spark 3.5 / Scala 2.12: mvn -Pspark3 clean package
+         NOTE: the VARIANT type is not available on this build - Spark 3.5 has no VariantType and
+         iceberg-spark-runtime-3.5 ships no variant support. -->
+    <profile>
+      <id>spark3</id>
+      <properties>
+        <spark.version>3.5.3</spark.version>
+        <spark.binary.version>3.5</spark.binary.version>
+        <scala.version>2.12.18</scala.version>
+        <scala.binary.version>2.12</scala.binary.version>
+        <!-- Delta 3.3.2 is the Spark 3.5 line -->
+        <delta.version>3.3.2</delta.version>
+        <!-- Spark 3.5 runs on Java 11; Iceberg 1.11.0 jars are Java 17 bytecode, so Iceberg
+             workloads on this build still require a Java 17 cluster runtime. -->
+        <maven.compiler.release>11</maven.compiler.release>
+        <spark.variant.srcdir>${project.basedir}/src/main/scala-spark3</spark.variant.srcdir>
+      </properties>
+    </profile>
+  </profiles>
 </project>
