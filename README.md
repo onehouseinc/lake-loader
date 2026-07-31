@@ -11,6 +11,11 @@ The tool consists of two main components:
 ![Figure: Shows the Lake Loader tool's high-level functioning to benchmark incremental loads across popular cloud data platforms.
 ](src/main/resources/images/lakeLoaderArch.png)
 
+> **Benchmarking a large Hudi table?** Bootstrapping it the straightforward way writes the whole
+> dataset once per benchmark variant, which at hundreds of TB takes days. See
+> [EFFICIENT_BOOTSTRAP.md](EFFICIENT_BOOTSTRAP.md) for a flow that pays the real write cost for a
+> single partition and manufactures the rest at the file level.
+
 
 ### Building
 
@@ -146,6 +151,17 @@ ingestion patterns captured from actual commit metadata.
   (`key`/`partition`/`round`/`ts`). Useful for replicating a real table's full partition
   count / RLI-shard footprint without paying the on-disk cost of fully-populated records for
   cold/historical partitions that never receive real incremental traffic.
+* **Optional `bootstrap.suffixKeyWithPartitionPath`** (default `false`) — append
+  `_<partitionPath>` to round-0 keys, giving `<uuid>-<round:%03d>_<partitionPath>` (the normal
+  `--primary-key-type` key plus a partition suffix). Set this when the bootstrap is a seed
+  partition that will later be fanned out across many partitions by copying its base files and
+  rewriting only the key suffix (see [EFFICIENT_BOOTSTRAP.md](EFFICIENT_BOOTSTRAP.md)): that
+  rewriter splits on the *last* underscore, so a key without one gains a suffix rather than having
+  it replaced. The base key has no underscore of its own, so the split lands on the separator and
+  the whole `<uuid>-<round>` prefix survives the rewrite. Unlike
+  `externalBootstrap.suffixKeyWithPartitionPath` (which mints a bare `<uuid>_<partitionPath>`),
+  the `%03d` round tag is retained — but it is no longer the last 3 characters, so extract it with
+  `regexp_extract(key, "-(\\d{3})_", 1)` rather than `substring(key, -3, 3)`.
 
 ### External Bootstrap Mode
 

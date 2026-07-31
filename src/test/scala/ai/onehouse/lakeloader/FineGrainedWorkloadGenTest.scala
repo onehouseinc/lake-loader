@@ -184,4 +184,64 @@ class FineGrainedWorkloadGenTest extends AnyFunSuite with BeforeAndAfterAll {
     assert(round1.filter(col("partition") =!= "2026-03-01").count() == 0)
     assert(round1.select("key").distinct().count() == 5)
   }
+
+  /**
+   * The seed half of the efficient-bootstrap flow (see EFFICIENT_BOOTSTRAP.md): round-0 keys must
+   * be `<uuid>-<round:%03d>_<partition>` so that `ParquetPartitionRewriteJob`, which splits on the
+   * LAST underscore, *replaces* the partition suffix when fanning the seed partition out rather
+   * than appending a second one. The round tag is retained so keys stay self-identifying.
+   */
+  test("bootstrap.suffixKeyWithPartitionPath produces rewriter-compatible round-tagged keys") {
+    val spec = FineGrainedWorkloadSpec.fromJsonString("""
+      |{
+      |  "bootstrap": {"startDate": "2026-04-01", "endDate": "2026-04-02", "totalRecords": 20,
+      |                "suffixKeyWithPartitionPath": true},
+      |  "commits": []
+      |}""".stripMargin)
+
+    val outputPath = s"file://${workDir.toAbsolutePath}/workload_suffixed_seed"
+    new ChangeDataGenerator(spark, spec.totalRounds)
+      .generateFineGrainedWorkload(outputPath, spec, recordSize = 256)
+
+    import org.apache.spark.sql.functions._
+    val round0 = spark.read.parquet(s"$outputPath/0")
+    assert(round0.count() == 20)
+    // Every key ends in its OWN partition — the suffix is applied after the partition is chosen.
+    assert(round0.filter(!col("key").endsWith(concat(lit("_"), col("partition")))).count() == 0)
+    // Both partitions are actually represented, so the check above is not vacuous.
+    assert(round0.select("partition").distinct().count() == 2)
+    // Exactly one underscore: the base key uses '-' throughout, so the rewriter's last-underscore
+    // split lands on the separator added here and never inside the uuid/round prefix.
+    assert(round0.filter(size(split(col("key"), "_")) =!= 2).count() == 0)
+    // The %03d round tag survives ahead of the suffix, so a key still names the round that made it.
+    assert(round0.filter(regexp_extract(col("key"), "-(\\d{3})_", 1) =!= "000").count() == 0)
+    assert(round0.select("key").distinct().count() == 20)
+
+    // Simulate the rewrite job retargeting the seed partition to a new one: the whole
+    // <uuid>-<round> prefix must survive and the keys must stay globally unique.
+    val basePrefix = substring_index(col("key"), "_", 1)
+    val rewritten = round0.select(concat(basePrefix, lit("_2026-04-09")).as("key"))
+    assert(rewritten.distinct().count() == 20)
+    assert(rewritten.intersect(round0.select("key")).count() == 0)
+    assert(rewritten.filter(regexp_extract(col("key"), "-(\\d{3})_", 1) =!= "000").count() == 0)
+  }
+
+  /** Without the flag, keys keep the `<uuid>-<round:%03d>` shape and carry no underscore. */
+  test("bootstrap key shape is unchanged when suffixKeyWithPartitionPath is not set") {
+    val spec = FineGrainedWorkloadSpec.fromJsonString("""
+      |{
+      |  "bootstrap": {"startDate": "2026-05-01", "endDate": "2026-05-01", "totalRecords": 10},
+      |  "commits": []
+      |}""".stripMargin)
+
+    val outputPath = s"file://${workDir.toAbsolutePath}/workload_unsuffixed_seed"
+    new ChangeDataGenerator(spark, spec.totalRounds)
+      .generateFineGrainedWorkload(outputPath, spec, recordSize = 256)
+
+    import org.apache.spark.sql.functions._
+    val round0 = spark.read.parquet(s"$outputPath/0")
+    assert(round0.count() == 10)
+    assert(round0.filter(col("key").contains("_")).count() == 0)
+    assert(round0.filter(!col("key").endsWith("-000")).count() == 0)
+  }
 }

@@ -43,8 +43,24 @@ case class CommitSpec(partitionOps: List[(String, PartitionOps)])
 /**
  * Bootstrap (round 0) definition: `totalRecords` inserts distributed evenly across one
  * partition per day in `[startDate, endDate]` (both inclusive).
+ *
+ * @param suffixKeyWithPartitionPath when true, round-0 keys get `_<partitionPath>` appended, i.e.
+ *                                   `<uuid>-<round>_<partition>`. Set this when the bootstrap is a
+ *                                   single seed partition that will later be fanned out across
+ *                                   many partitions by copying its base files and rewriting only
+ *                                   the key suffix (the `ParquetPartitionRewriteJob` flow): that
+ *                                   rewriter splits on the *last* underscore, so a key without one
+ *                                   gains a suffix rather than having it replaced. Like
+ *                                   [[ExternalBootstrapSpec.suffixKeyWithPartitionPath]], seed and
+ *                                   incremental insert keys then both end in `_<partition>` with a
+ *                                   single underscore; unlike it, the `%03d` round tag is kept
+ *                                   here, so round-0 keys stay self-identifying after the fan-out.
  */
-case class BootstrapSpec(startDate: LocalDate, endDate: LocalDate, totalRecords: Long) {
+case class BootstrapSpec(
+    startDate: LocalDate,
+    endDate: LocalDate,
+    totalRecords: Long,
+    suffixKeyWithPartitionPath: Boolean = false) {
 
   def numPartitions: Int = (ChronoUnit.DAYS.between(startDate, endDate) + 1).toInt
 
@@ -192,7 +208,10 @@ object FineGrainedWorkloadSpec {
       None
     } else {
       require(node.isObject, "'bootstrap' must be a JSON object")
-      checkAllowedFields(node, Set("startDate", "endDate", "totalRecords"), "'bootstrap'")
+      checkAllowedFields(
+        node,
+        Set("startDate", "endDate", "totalRecords", "suffixKeyWithPartitionPath"),
+        "'bootstrap'")
 
       val startDate = parseDate(requiredText(node, "startDate", "bootstrap"), "bootstrap.startDate")
       val endDate = parseDate(requiredText(node, "endDate", "bootstrap"), "bootstrap.endDate")
@@ -207,7 +226,15 @@ object FineGrainedWorkloadSpec {
 
       val totalRecords = requiredLong(node, "totalRecords", "bootstrap")
       require(totalRecords > 0, s"bootstrap.totalRecords must be > 0, got $totalRecords")
-      Some(BootstrapSpec(startDate, endDate, totalRecords))
+      val suffixKeyWithPartitionPath = {
+        val value = node.get("suffixKeyWithPartitionPath")
+        if (value == null || value.isNull) false
+        else {
+          require(value.isBoolean, "'bootstrap.suffixKeyWithPartitionPath' must be a boolean")
+          value.asBoolean()
+        }
+      }
+      Some(BootstrapSpec(startDate, endDate, totalRecords, suffixKeyWithPartitionPath))
     }
   }
 

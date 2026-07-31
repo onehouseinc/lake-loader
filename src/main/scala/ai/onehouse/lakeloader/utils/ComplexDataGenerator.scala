@@ -49,6 +49,32 @@ object ComplexDataGenerator extends Serializable {
     }
 
   /**
+   * Append `_<partitionPath>` to a normal [[generateKey]] key, giving
+   * `<uuid>-<round:%03d>_<partitionPath>` (or `<ts>-<uuid>-<round>_<partitionPath>` for
+   * [[KeyTypes.TemporallyOrdered]]).
+   *
+   * Used by bootstraps that are later fanned out across partitions by copying one partition's base
+   * files verbatim and rewriting only the key suffix (the `ParquetPartitionRewriteJob` flow). That
+   * rewriter splits on the *last* underscore, so a key must already carry one for its suffix to be
+   * replaced rather than appended. The base key contains no underscore, so the split lands exactly
+   * on the separator added here and the whole `<uuid>-<round>` prefix survives the rewrite.
+   *
+   * The `%03d` round tag is deliberately retained (unlike the externalBootstrap insert-key scheme,
+   * which mints a bare `<uuid>_<partition>`): it keeps round-0 keys self-identifying, so a key's
+   * originating round is still recoverable after the fan-out.
+   *
+   * Note the round tag is no longer the last 3 characters, so tests must extract it with a regex
+   * (e.g. `regexp_extract(key, "-(\\d{3})_", 1)`) rather than `substring(key, -3, 3)`.
+   */
+  def partitionSuffixedKey(
+      keyType: KeyType,
+      round: Int,
+      ts: Long,
+      random: Random,
+      partitionPath: String): String =
+    s"${generateKey(keyType, round, ts, random)}_$partitionPath"
+
+  /**
    * Reassemble a full-schema Row from a payload row (i.e. `fullSchema` minus [[IDENTITY_FIELDS]],
    * same field order) plus explicit identity values. Used by the external-bootstrap datagen path:
    * payload data is generated once into a shared pool with identity columns dropped, then sampled
@@ -88,6 +114,9 @@ object ComplexDataGenerator extends Serializable {
    *                          produce near-empty-on-disk records for partitions that need to exist
    *                          (matching a real table's partition count) but not carry realistic
    *                          data volume.
+   * @param suffixKeyWithPartitionPath when true, the normal `keyType` key gets `_<partition>`
+   *                          appended (see [[partitionSuffixedKey]]). Applied after the partition
+   *                          is sampled, so the suffix always matches the row's own partition.
    */
   def generateRow(
       schema: StructType,
@@ -97,10 +126,13 @@ object ComplexDataGenerator extends Serializable {
       keyType: KeyType,
       recordSize: Int,
       random: Random,
-      nullifyDataFields: Boolean = false): Row = {
+      nullifyDataFields: Boolean = false,
+      suffixKeyWithPartitionPath: Boolean = false): Row = {
     val ts = System.currentTimeMillis()
-    val key = generateKey(keyType, round, ts, random)
     val partition = partitionPaths(sampleFromCDF(partitionDistributionCDF, random.nextDouble()))
+    val key =
+      if (suffixKeyWithPartitionPath) partitionSuffixedKey(keyType, round, ts, random, partition)
+      else generateKey(keyType, round, ts, random)
     val sizeFactor = Math.max(recordSize / schema.fields.length, 1)
 
     val values = schema.fields.map { field =>
@@ -178,12 +210,15 @@ object ComplexDataGenerator extends Serializable {
 
       case st: StructType =>
         val childSizeFactor = Math.max(sizeFactor / Math.max(st.fields.length, 1), 1)
-        Row.fromSeq(st.fields.map(f => generateValue(f.dataType, f.nullable, childSizeFactor, random)))
+        Row.fromSeq(
+          st.fields.map(f => generateValue(f.dataType, f.nullable, childSizeFactor, random)))
 
       case ArrayType(elementType, containsNull) =>
         val size = 1 + random.nextInt(3)
         val childSizeFactor = Math.max(sizeFactor / 4, 1)
-        (0 until size).map(_ => generateValue(elementType, containsNull, childSizeFactor, random)).toArray
+        (0 until size)
+          .map(_ => generateValue(elementType, containsNull, childSizeFactor, random))
+          .toArray
 
       case MapType(keyType, valueType, valueContainsNull) =>
         val size = 1 + random.nextInt(2)

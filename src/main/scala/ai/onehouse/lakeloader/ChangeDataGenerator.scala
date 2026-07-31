@@ -81,7 +81,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       keyType: KeyType,
       schema: StructType,
       random: Random,
-      nullifyDataFields: Boolean = false) = {
+      nullifyDataFields: Boolean = false,
+      suffixKeyWithPartitionPath: Boolean = false) = {
     ComplexDataGenerator.generateRow(
       schema,
       round,
@@ -90,7 +91,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       keyType,
       size,
       random,
-      nullifyDataFields)
+      nullifyDataFields,
+      suffixKeyWithPartitionPath)
   }
 
   /**
@@ -366,8 +368,12 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
         // externalBootstrap is set, so round 0 (bootstrap) is never reached.
         val ext = spec.externalBootstrap.get
         val commit = spec.commits(curRound - 1)
-        val numInserts = commit.partitionOps.collect { case (_, ops) if ops.inserts > 0 => ops.inserts }.sum
-        val numUpdates = commit.partitionOps.collect { case (_, ops) if ops.updates > 0 => ops.updates }.sum
+        val numInserts = commit.partitionOps.collect {
+          case (_, ops) if ops.inserts > 0 => ops.inserts
+        }.sum
+        val numUpdates = commit.partitionOps.collect {
+          case (_, ops) if ops.updates > 0 => ops.updates
+        }.sum
         val (effectiveRecordSize, effectiveCompressionRatio) = effectiveSizing
         val estimatedTotalBytes =
           (numInserts + numUpdates).toDouble * effectiveRecordSize * effectiveCompressionRatio
@@ -436,6 +442,11 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
              |$lineSepBold
              |""".stripMargin)
 
+        // Only round 0 honors the bootstrap's key-suffix flag: it exists so a seed partition can
+        // later be fanned out by ParquetPartitionRewriteJob, which rewrites the suffix after the
+        // last '_'. Later rounds in this (non-external) path keep the normal keyType scheme.
+        val suffixInsertKeys =
+          curRound == 0 && spec.bootstrap.exists(_.suffixKeyWithPartitionPath)
         val insertsDF =
           generateExactInserts(
             curRound,
@@ -444,7 +455,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
             keyType,
             schema,
             targetParallelism,
-            spec.nullifiedPartitions)
+            spec.nullifiedPartitions,
+            suffixInsertKeys)
         var persistedIntermediates: Seq[DataFrame] = Seq.empty
         val upsertDF =
           if (numUpdates == 0) insertsDF
@@ -494,6 +506,10 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
    * global index is mapped deterministically onto a partition via the cumulative count
    * boundaries — unlike the CDF-sampling path, per-partition counts are exact, not expected
    * values.
+   *
+   * @param suffixKeyWithPartitionPath when true, keys are minted as `<uuid>_<partition>` rather
+   *                                   than by `keyType` (see
+   *                                   [[ComplexDataGenerator.partitionSuffixedKey]]).
    */
   private def generateExactInserts(
       curRound: Int,
@@ -502,7 +518,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       keyType: KeyType,
       schema: StructType,
       targetParallelism: Int,
-      nullifiedPartitions: Set[String] = Set.empty): DataFrame = {
+      nullifiedPartitions: Set[String] = Set.empty,
+      suffixKeyWithPartitionPath: Boolean = false): DataFrame = {
     // Drop zero-count entries (e.g. bootstrap totalRecords < numPartitions): they would create
     // duplicate cumulative boundaries below, and binarySearch makes no guarantee which duplicate
     // it returns — a row could get misassigned to a partition specced for 0 records. Filtering
@@ -534,7 +551,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
             keyType,
             schema,
             random,
-            nullifyFlags(partitionIdx))
+            nullifyFlags(partitionIdx),
+            suffixKeyWithPartitionPath)
         }
       }
     spark.createDataFrame(insertsRDD, schema)
@@ -546,7 +564,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
    * `(key, partition)` pairs — the payload is attached later from the shared pool via
    * [[generateExternalBootstrapRound]].
    *
-   * @param suffixKeyWithPartitionPath when true, generate `<uuid>-<partition>` keys instead of
+   * @param suffixKeyWithPartitionPath when true, generate `<uuid>_<partition>` keys instead of
    *                                   the normal `keyType`-based scheme (see
    *                                   [[ExternalBootstrapSpec.suffixKeyWithPartitionPath]]).
    */
@@ -577,7 +595,12 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
           val partitionValue = partitionValues(partitionIdx)
           val key =
             if (suffixKeyWithPartitionPath) s"${randomUUID()}_$partitionValue"
-            else ComplexDataGenerator.generateKey(keyType, curRound, System.currentTimeMillis(), random)
+            else
+              ComplexDataGenerator.generateKey(
+                keyType,
+                curRound,
+                System.currentTimeMillis(),
+                random)
           Row(key, partitionValue)
         }
       }
@@ -647,14 +670,23 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
 
     val parallelism = Math.max(
       2,
-      Math.ceil(poolSize.toDouble * recordSize * COMPRESSION_RATIO_GUESS / targetDataFileSize).toInt)
+      Math
+        .ceil(poolSize.toDouble * recordSize * COMPRESSION_RATIO_GUESS / targetDataFileSize)
+        .toInt)
     // Round 0 is otherwise unused whenever externalBootstrap is set (generation starts at round
     // 1), so it's a safe, non-colliding round number to seed this one-off pool generation with.
     val fullRowsDF =
-      generateExactInserts(0, Seq(("__payload_pool__", poolSize)), recordSize, keyType, schema, parallelism)
+      generateExactInserts(
+        0,
+        Seq(("__payload_pool__", poolSize)),
+        recordSize,
+        keyType,
+        schema,
+        parallelism)
     val payloadOnlyDF = fullRowsDF.drop(ComplexDataGenerator.IDENTITY_FIELDS.toSeq: _*)
     val indexed = zipWithSequentialIndex(payloadOnlyDF, "_pool_idx").persist()
-    indexed.count() // materialize once; every round's sampling join below reuses this persisted result
+    indexed
+      .count() // materialize once; every round's sampling join below reuses this persisted result
     (indexed, poolSize)
   }
 
@@ -677,8 +709,12 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       schema: StructType,
       keyType: KeyType,
       targetParallelism: Int): (DataFrame, Seq[DataFrame]) = {
-    val insertCounts = commit.partitionOps.collect { case (p, ops) if ops.inserts > 0 => (p, ops.inserts) }
-    val updateCounts = commit.partitionOps.collect { case (p, ops) if ops.updates > 0 => (p, ops.updates) }
+    val insertCounts = commit.partitionOps.collect {
+      case (p, ops) if ops.inserts > 0 => (p, ops.inserts)
+    }
+    val updateCounts = commit.partitionOps.collect {
+      case (p, ops) if ops.updates > 0 => (p, ops.updates)
+    }
     val numInserts = insertCounts.map(_._2).sum
     val numUpdates = updateCounts.map(_._2).sum
     val keySchema = StructType(
@@ -758,9 +794,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
         s"Round # $currentRound requests $desired updates for partition '$partition', but no " +
           s"keys exist for it in external Hudi table '${ext.tablePath}'")
       if (available < desired) {
-        println(
-          s"WARN: Round # $currentRound requests $desired updates for partition '$partition' " +
-            s"but only $available distinct keys exist in the external table; updating all $available")
+        println(s"WARN: Round # $currentRound requests $desired updates for partition '$partition' " +
+          s"but only $available distinct keys exist in the external table; updating all $available")
       }
       (partition, Math.min(desired, available), available)
     }
@@ -1312,13 +1347,12 @@ object ChangeDataGenerator {
               case None =>
                 s"external bootstrap (${spec.externalBootstrap.get.tablePath}), round 0 skipped"
             }
-            println(
-              s"Using fine-grained workload spec from $specPath: " +
-                s"${spec.totalRounds - spec.startRound} rounds starting at round ${spec.startRound} " +
-                s"(${spec.commits.size} commits), $bootstrapDescription. " +
-                "Flags --number-rounds, --number-records-per-round, --update-ratio, " +
-                "--total-partitions, --partition-distribution, --update-pattern and " +
-                "--num-partitions-to-update are ignored in this mode.")
+            println(s"Using fine-grained workload spec from $specPath: " +
+              s"${spec.totalRounds - spec.startRound} rounds starting at round ${spec.startRound} " +
+              s"(${spec.commits.size} commits), $bootstrapDescription. " +
+              "Flags --number-rounds, --number-records-per-round, --update-ratio, " +
+              "--total-partitions, --partition-distribution, --update-pattern and " +
+              "--num-partitions-to-update are ignored in this mode.")
             val changeDataGenerator = new ChangeDataGenerator(spark, spec.totalRounds)
             changeDataGenerator.generateFineGrainedWorkload(
               config.outputPath,

@@ -228,6 +228,35 @@ class FineGrainedWorkloadSpecTest extends AnyFunSuite {
     assert(ext.suffixKeyWithPartitionPath == false)
   }
 
+  test("bootstrap.suffixKeyWithPartitionPath defaults to false and can be enabled") {
+    val default = parse("""
+      |{
+      |  "bootstrap": {"startDate": "2026-01-01", "endDate": "2026-01-01", "totalRecords": 10},
+      |  "commits": []
+      |}""".stripMargin)
+    assert(!default.bootstrap.get.suffixKeyWithPartitionPath)
+
+    val enabled = parse("""
+      |{
+      |  "bootstrap": {"startDate": "2026-01-01", "endDate": "2026-01-01", "totalRecords": 10,
+      |                "suffixKeyWithPartitionPath": true},
+      |  "commits": []
+      |}""".stripMargin)
+    assert(enabled.bootstrap.get.suffixKeyWithPartitionPath)
+  }
+
+  test("bootstrap.suffixKeyWithPartitionPath must be a boolean") {
+    val thrown = intercept[IllegalArgumentException] {
+      parse("""
+        |{
+        |  "bootstrap": {"startDate": "2026-01-01", "endDate": "2026-01-01", "totalRecords": 10,
+        |                "suffixKeyWithPartitionPath": "yes"},
+        |  "commits": []
+        |}""".stripMargin)
+    }
+    assert(thrown.getMessage.contains("must be a boolean"))
+  }
+
   test("externalBootstrap.suffixKeyWithPartitionPath can be enabled") {
     val spec = parse("""
       |{
