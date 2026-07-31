@@ -15,7 +15,7 @@
 package ai.onehouse.lakeloader
 
 import ai.onehouse.lakeloader.ChangeDataGenerator.{genExactParallelRDD, genParallelRDD, COMPRESSION_RATIO_GUESS, PARTITION_PATH_FIELD_NAME, RECORD_KEY_FIELD_NAME}
-import ai.onehouse.lakeloader.configs.{DatagenConfig, FineGrainedWorkloadSpec, KeyTypes, PartitionDistributionSpec, UpdatePatterns}
+import ai.onehouse.lakeloader.configs.{CommitSpec, DatagenConfig, ExternalBootstrapSpec, FineGrainedWorkloadSpec, KeyTypes, PartitionDistributionSpec, UpdatePatterns}
 import ai.onehouse.lakeloader.configs.KeyTypes.KeyType
 import ai.onehouse.lakeloader.configs.UpdatePatterns.{Uniform, UpdatePatterns, Zipf}
 import ai.onehouse.lakeloader.parser.ChangeDataGeneratorParser
@@ -26,7 +26,7 @@ import org.apache.spark.sql.CatalystUtil.partitionLocalLimit
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.{DataFrame, Row, SaveMode, SparkSession}
+import org.apache.spark.sql.{Column, DataFrame, Row, SaveMode, SparkSession}
 import ai.onehouse.lakeloader.utils.StringUtils.lineSepBold
 
 import java.io.Serializable
@@ -80,7 +80,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       partitionDistributionCDF: List[Double],
       keyType: KeyType,
       schema: StructType,
-      random: Random) = {
+      random: Random,
+      nullifyDataFields: Boolean = false) = {
     ComplexDataGenerator.generateRow(
       schema,
       round,
@@ -88,7 +89,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       partitionDistributionCDF,
       keyType,
       size,
-      random)
+      random,
+      nullifyDataFields)
   }
 
   /**
@@ -268,6 +270,11 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
    * plus exactly the requested number of updates, the latter sampled uniformly at random from
    * the latest version of the keys already present in that partition (from rounds < k only).
    *
+   * When `spec.externalBootstrap` is set instead of `spec.bootstrap`, round 0 is never generated
+   * (generation starts at round 1, per `spec.startRound`) and updates instead sample real
+   * `_hoodie_record_key` values back from the pre-populated external Hudi table named by the
+   * spec. See [[generateExternalBootstrapRound]].
+   *
    * Unlike [[generateWorkload]] (which samples partitions from a probability distribution),
    * this path produces deterministic, exact per-partition record counts.
    *
@@ -281,7 +288,9 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
    * @param targetDataFileSize data file size hint that data generation will aim to produce
    * @param skipIfExists       should skip generation for the rounds possibly generated during previous runs
    * @param keyType            format for generating the primary key
-   * @param startRound         round to start generating from (for resuming), default 0
+   * @param startRound         round to start generating from (for resuming); pass -1 (default) to
+   *                           use `spec.startRound` (0 for a normal bootstrap spec, 1 for external
+   *                           bootstrap)
    * @param avroSchemaPath     optional custom Avro schema (.avsc) to generate data for
    */
   def generateFineGrainedWorkload(
@@ -292,20 +301,32 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       targetDataFileSize: Int = 128 * 1024 * 1024,
       skipIfExists: Boolean = false,
       keyType: KeyType = KeyTypes.Random,
-      startRound: Int = 0,
+      startRound: Int = -1,
       avroSchemaPath: Option[String] = None): Unit = {
     require(path.nonEmpty, "Path cannot be empty")
+    val effectiveStartRound = if (startRound == -1) spec.startRound else startRound
     val totalRounds = spec.totalRounds
     require(
-      startRound >= 0 && startRound < totalRounds,
-      s"startRound must be within [0, $totalRounds), got $startRound")
+      effectiveStartRound >= spec.startRound && effectiveStartRound < totalRounds,
+      s"startRound must be within [${spec.startRound}, $totalRounds), got $effectiveStartRound")
     if (avroSchemaPath.isEmpty) {
       require(
         numColumns >= 5,
         "The number of columns needs to be at least 5 since we need at least 4 cols for key, partition, round, and timestamp.")
     }
 
-    val bootstrapPartitions = spec.bootstrap.partitionValues
+    // With externalBootstrap, there is no bootstrap round to derive representative partitions
+    // from; fall back to every partition referenced anywhere in the commits (only used as a
+    // sizing-sample seed and, in the non-external path, as round 0's partition list).
+    val representativePartitions = spec.bootstrap match {
+      case Some(bootstrap) => bootstrap.partitionValues
+      case None =>
+        val fromCommits = spec.commits.flatMap(_.partitionOps.map(_._1)).distinct
+        require(
+          fromCommits.nonEmpty,
+          "externalBootstrap requires at least one commit with a touched partition")
+        fromCommits
+    }
     val schema = avroSchemaPath match {
       case Some(schemaPath) =>
         AvroSchemaUtils.loadSchemaFromAvscFile(schemaPath, spark.sparkContext.hadoopConfiguration)
@@ -314,10 +335,25 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     }
     // Lazy: with a custom Avro schema the sizing does a ~20MB sample write; only pay for it
     // when some round actually generates (a fully skipped --skip-if-exists rerun never does).
-    lazy val effectiveSizing =
-      resolveEffectiveSizing(path, schema, bootstrapPartitions, recordSize, keyType, avroSchemaPath)
+    lazy val effectiveSizing = resolveEffectiveSizing(
+      path,
+      schema,
+      representativePartitions,
+      recordSize,
+      keyType,
+      avroSchemaPath)
 
-    (startRound until totalRounds).foreach(curRound => {
+    // Built once, reused by every round: see generateExternalBootstrapRound's scaladoc for why a
+    // single shared pool (rather than one per partition or per commit) is sufficient.
+    lazy val externalBootstrapPool: (DataFrame, Long) = buildExternalBootstrapPayloadPool(
+      spec.externalBootstrap.get,
+      spec.commits,
+      recordSize,
+      keyType,
+      schema,
+      targetDataFileSize)
+
+    (effectiveStartRound until totalRounds).foreach(curRound => {
       val targetLocation = s"$path/$curRound"
       val targetLocationPath = new Path(targetLocation)
       val fs = targetLocationPath.getFileSystem(spark.sparkContext.hadoopConfiguration)
@@ -325,10 +361,54 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       if (skipIfExists && fs
           .exists(targetLocationPath) && fs.listFiles(targetLocationPath, false).hasNext) {
         println(s"Skipping generation for round # $curRound, location $targetLocation is not empty")
+      } else if (spec.externalBootstrap.isDefined) {
+        // curRound is always >= 1 here: startRound defaults to 1 (spec.startRound) whenever
+        // externalBootstrap is set, so round 0 (bootstrap) is never reached.
+        val ext = spec.externalBootstrap.get
+        val commit = spec.commits(curRound - 1)
+        val numInserts = commit.partitionOps.collect { case (_, ops) if ops.inserts > 0 => ops.inserts }.sum
+        val numUpdates = commit.partitionOps.collect { case (_, ops) if ops.updates > 0 => ops.updates }.sum
+        val (effectiveRecordSize, effectiveCompressionRatio) = effectiveSizing
+        val estimatedTotalBytes =
+          (numInserts + numUpdates).toDouble * effectiveRecordSize * effectiveCompressionRatio
+        val targetParallelism =
+          Math.max(2, Math.ceil(estimatedTotalBytes / targetDataFileSize).toInt)
+        val (payloadPoolDF, poolSize) = externalBootstrapPool
+
+        println(s"""
+             |$lineSepBold
+             |Round # $curRound: numInserts $numInserts, numUpdates $numUpdates
+             |(external bootstrap: ${ext.tablePath})
+             |Creating at $targetLocation
+             |$lineSepBold
+             |""".stripMargin)
+
+        val (roundDF, persistedIntermediates) = generateExternalBootstrapRound(
+          curRound,
+          commit,
+          ext,
+          payloadPoolDF,
+          poolSize,
+          schema,
+          keyType,
+          targetParallelism)
+
+        spark.time {
+          roundDF
+            .repartition(targetParallelism)
+            .write
+            .format(ChangeDataGenerator.DEFAULT_DATA_GEN_FORMAT)
+            .mode(SaveMode.Overwrite)
+            .save(targetLocation)
+        }
+        persistedIntermediates.foreach(_.unpersist())
+        spark.catalog.clearCache()
       } else {
         val (insertCounts, updateCounts) =
           if (curRound == 0) {
-            (evenSplit(bootstrapPartitions, spec.bootstrap.totalRecords), Seq.empty[(String, Long)])
+            (
+              evenSplit(representativePartitions, spec.bootstrap.get.totalRecords),
+              Seq.empty[(String, Long)])
           } else {
             val commit = spec.commits(curRound - 1)
             (
@@ -363,7 +443,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
             recordSize,
             keyType,
             schema,
-            targetParallelism)
+            targetParallelism,
+            spec.nullifiedPartitions)
         var persistedIntermediates: Seq[DataFrame] = Seq.empty
         val upsertDF =
           if (numUpdates == 0) insertsDF
@@ -375,7 +456,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
             val (rawUpdatesDF, persisted) =
               getExactPerPartitionUpdates(updateCounts, priorRoundPaths, curRound)
             persistedIntermediates = persisted
-            insertsDF.unionByName(regenerateUpdateValues(rawUpdatesDF, curRound))
+            insertsDF.unionByName(
+              regenerateUpdateValues(rawUpdatesDF, curRound, spec.nullifiedPartitions))
           }
 
         spark.time {
@@ -419,7 +501,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       recordSize: Int,
       keyType: KeyType,
       schema: StructType,
-      targetParallelism: Int): DataFrame = {
+      targetParallelism: Int,
+      nullifiedPartitions: Set[String] = Set.empty): DataFrame = {
     // Drop zero-count entries (e.g. bootstrap totalRecords < numPartitions): they would create
     // duplicate cumulative boundaries below, and binarySearch makes no guarantee which duplicate
     // it returns — a row could get misassigned to a partition specced for 0 records. Filtering
@@ -431,6 +514,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     }
     // Singleton partition list per entry so generateRow's CDF sampling degenerates to a fixed pick.
     val partitionSingletons = positiveCounts.map(t => List(t._1)).toArray
+    val nullifyFlags = positiveCounts.map(t => nullifiedPartitions.contains(t._1)).toArray
     val cumulativeEnds = positiveCounts.map(_._2).scanLeft(0L)(_ + _).tail.toArray
     val singletonCDF = List(1.0)
 
@@ -449,10 +533,274 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
             singletonCDF,
             keyType,
             schema,
-            random)
+            random,
+            nullifyFlags(partitionIdx))
         }
       }
     spark.createDataFrame(insertsRDD, schema)
+  }
+
+  /**
+   * Generate exactly the requested number of *new* keys per partition, for the external-bootstrap
+   * path's inserts. Same exact-count RDD mapping as [[generateExactInserts]], but only produces
+   * `(key, partition)` pairs — the payload is attached later from the shared pool via
+   * [[generateExternalBootstrapRound]].
+   *
+   * @param suffixKeyWithPartitionPath when true, generate `<uuid>-<partition>` keys instead of
+   *                                   the normal `keyType`-based scheme (see
+   *                                   [[ExternalBootstrapSpec.suffixKeyWithPartitionPath]]).
+   */
+  private def generateExactInsertKeys(
+      curRound: Int,
+      insertCounts: Seq[(String, Long)],
+      keyType: KeyType,
+      targetParallelism: Int,
+      suffixKeyWithPartitionPath: Boolean = false): DataFrame = {
+    val keySchema = StructType(
+      Seq(
+        StructField("key", StringType, nullable = false),
+        StructField("partition", StringType, nullable = false)))
+    val positiveCounts = insertCounts.filter(_._2 > 0)
+    val totalInserts = positiveCounts.map(_._2).sum
+    if (totalInserts == 0) {
+      return spark.createDataFrame(spark.sparkContext.emptyRDD[Row], keySchema)
+    }
+    val partitionValues = positiveCounts.map(_._1).toArray
+    val cumulativeEnds = positiveCounts.map(_._2).scanLeft(0L)(_ + _).tail.toArray
+
+    val keysRDD = genExactParallelRDD(spark, targetParallelism, totalInserts)
+      .mapPartitionsWithIndex { (partIdx, it) =>
+        val random = taskRandom(curRound, partIdx)
+        it.map { globalIdx =>
+          val searched = java.util.Arrays.binarySearch(cumulativeEnds, globalIdx + 1)
+          val partitionIdx = if (searched >= 0) searched else -searched - 1
+          val partitionValue = partitionValues(partitionIdx)
+          val key =
+            if (suffixKeyWithPartitionPath) s"${randomUUID()}_$partitionValue"
+            else ComplexDataGenerator.generateKey(keyType, curRound, System.currentTimeMillis(), random)
+          Row(key, partitionValue)
+        }
+      }
+    spark.createDataFrame(keysRDD, keySchema)
+  }
+
+  /**
+   * Attach a dense sequential index column (0 until df.count()) to every row of `df`, via
+   * `RDD.zipWithIndex` (cheap, no shuffle) rather than a global `row_number()` window (which
+   * forces a single-partition sort). Used to pair up two independently-generated DataFrames of
+   * equal size row-for-row via an equi-join on the index column.
+   */
+  private def zipWithSequentialIndex(df: DataFrame, indexCol: String): DataFrame = {
+    val indexedSchema = df.schema.add(indexCol, LongType, nullable = false)
+    val indexedRDD = df.rdd.zipWithIndex().map { case (row, idx) => Row.fromSeq(row.toSeq :+ idx) }
+    spark.createDataFrame(indexedRDD, indexedSchema)
+  }
+
+  /**
+   * Sample exactly `n` rows (with replacement) from `indexedPoolDF` (a DataFrame carrying a dense
+   * `_pool_idx` column spanning `0 until poolSize`, as produced by
+   * [[buildExternalBootstrapPayloadPool]]). `n` is typically far larger than `poolSize` when
+   * summed across every partition touched in a commit, so replacement is required — only a
+   * single partition's own draw within one commit is effectively distinct (bounded by
+   * `payloadPoolMultiplier`, see the spec doc).
+   */
+  private def samplePoolRows(
+      indexedPoolDF: DataFrame,
+      poolSize: Long,
+      n: Long,
+      seed: Long): DataFrame = {
+    val idxDF = spark.range(n).select((rand(seed) * poolSize).cast(LongType).as("_pool_idx"))
+    idxDF.join(indexedPoolDF, "_pool_idx").drop("_pool_idx")
+  }
+
+  /**
+   * Build the single payload pool shared by every commit/partition in an externalBootstrap run.
+   * Payload rows carry every schema field except the identity fields (key/partition/round/ts,
+   * see [[ComplexDataGenerator.IDENTITY_FIELDS]]) — those are stitched on per-round by
+   * [[generateExternalBootstrapRound]] via [[ComplexDataGenerator.attachIdentity]].
+   *
+   * Sized to `payloadPoolMultiplier` times the single largest (inserts + updates) demand across
+   * every (partition, commit) pair in the whole spec: since payload generation doesn't depend on
+   * partition or commit, a pool that size covers any single commit's per-partition draw with
+   * headroom, and is reused (via sampling with replacement) across every other commit/partition
+   * instead of being regenerated — the win grows with how many commits touch the same hot
+   * partitions.
+   */
+  private def buildExternalBootstrapPayloadPool(
+      ext: ExternalBootstrapSpec,
+      commits: List[CommitSpec],
+      recordSize: Int,
+      keyType: KeyType,
+      schema: StructType,
+      targetDataFileSize: Int): (DataFrame, Long) = {
+    val maxSingleDemand =
+      commits.flatMap(_.partitionOps.map { case (_, ops) => ops.inserts + ops.updates }).max
+    val poolSize = Math.ceil(ext.payloadPoolMultiplier * maxSingleDemand).toLong
+
+    println(s"""
+         |$lineSepBold
+         |Building external-bootstrap payload pool: $poolSize rows
+         |(${ext.payloadPoolMultiplier}x max single-partition-per-commit demand of $maxSingleDemand),
+         |reused across all ${commits.size} commits.
+         |$lineSepBold
+         |""".stripMargin)
+
+    val parallelism = Math.max(
+      2,
+      Math.ceil(poolSize.toDouble * recordSize * COMPRESSION_RATIO_GUESS / targetDataFileSize).toInt)
+    // Round 0 is otherwise unused whenever externalBootstrap is set (generation starts at round
+    // 1), so it's a safe, non-colliding round number to seed this one-off pool generation with.
+    val fullRowsDF =
+      generateExactInserts(0, Seq(("__payload_pool__", poolSize)), recordSize, keyType, schema, parallelism)
+    val payloadOnlyDF = fullRowsDF.drop(ComplexDataGenerator.IDENTITY_FIELDS.toSeq: _*)
+    val indexed = zipWithSequentialIndex(payloadOnlyDF, "_pool_idx").persist()
+    indexed.count() // materialize once; every round's sampling join below reuses this persisted result
+    (indexed, poolSize)
+  }
+
+  /**
+   * Generate one round's worth of records for the externalBootstrap path: exact per-partition
+   * insert/update counts (from `commit`, identical semantics to the normal path), but with
+   * inserts freshly-keyed (no prior lake-loader-generated data to draw from) and updates sampled
+   * from real keys read back from the pre-populated external Hudi table, rather than from an
+   * earlier round's parquet output.
+   *
+   * Returns the round's DataFrame plus any persisted intermediates the caller must unpersist once
+   * the round has been written (matches the calling convention of [[getExactPerPartitionUpdates]]).
+   */
+  private def generateExternalBootstrapRound(
+      curRound: Int,
+      commit: CommitSpec,
+      ext: ExternalBootstrapSpec,
+      payloadPoolDF: DataFrame,
+      poolSize: Long,
+      schema: StructType,
+      keyType: KeyType,
+      targetParallelism: Int): (DataFrame, Seq[DataFrame]) = {
+    val insertCounts = commit.partitionOps.collect { case (p, ops) if ops.inserts > 0 => (p, ops.inserts) }
+    val updateCounts = commit.partitionOps.collect { case (p, ops) if ops.updates > 0 => (p, ops.updates) }
+    val numInserts = insertCounts.map(_._2).sum
+    val numUpdates = updateCounts.map(_._2).sum
+    val keySchema = StructType(
+      Seq(
+        StructField("key", StringType, nullable = false),
+        StructField("partition", StringType, nullable = false)))
+
+    val insertKeysDF = generateExactInsertKeys(
+      curRound,
+      insertCounts,
+      keyType,
+      targetParallelism,
+      ext.suffixKeyWithPartitionPath)
+    val (updateKeysDF, updatePersisted) =
+      if (numUpdates == 0) {
+        (spark.createDataFrame(spark.sparkContext.emptyRDD[Row], keySchema), Seq.empty[DataFrame])
+      } else {
+        val picked = getExactPerPartitionUpdatesFromHudi(ext, updateCounts, curRound)
+        (picked.select("key", "partition"), Seq(picked))
+      }
+
+    val identityDF = insertKeysDF.unionByName(updateKeysDF)
+    val identityIndexed = zipWithSequentialIndex(identityDF, "_ridx")
+
+    val ts = System.currentTimeMillis()
+    val sampledPayload =
+      samplePoolRows(payloadPoolDF, poolSize, numInserts + numUpdates, SEED + curRound)
+    val sampledPayloadIndexed = zipWithSequentialIndex(sampledPayload, "_ridx")
+
+    val joined = identityIndexed.join(sampledPayloadIndexed, "_ridx")
+    val finalDF = joined.select(schema.fields.map { field =>
+      field.name match {
+        case "round" => lit(curRound).as("round")
+        case "ts" => lit(ts).as("ts")
+        case name => col(name)
+      }
+    }: _*)
+    (finalDF, updatePersisted)
+  }
+
+  /**
+   * Like [[getExactPerPartitionUpdates]], but sources candidate keys from a pre-populated
+   * external Hudi table instead of previously-generated round directories: reads
+   * `recordKeyField`/`partitionPathField` (partition- and column-pruned; works with or without
+   * the Record Level Index, since Spark's ordinary partition pruning plus Parquet column pruning
+   * apply either way), then applies the exact same stratified-sample-then-trim technique to hit
+   * exact per-partition counts. No `rank()`-by-round de-duplication is needed here (unlike the
+   * normal path) since the Hudi table already holds only the latest version of each key.
+   */
+  private def getExactPerPartitionUpdatesFromHudi(
+      ext: ExternalBootstrapSpec,
+      updateCounts: Seq[(String, Long)],
+      currentRound: Int): DataFrame = {
+    val partitionsToUpdate = updateCounts.map(_._1)
+    println(
+      s"Reading existing keys from external Hudi table '${ext.tablePath}' for round # $currentRound: " +
+        updateCounts.map(t => s"${t._1}=${t._2}").mkString(", "))
+
+    val sourceDf = spark.read
+      .format("hudi")
+      .load(ext.tablePath)
+      .select(col(ext.partitionPathField).as("partition"), col(ext.recordKeyField).as("key"))
+      .filter(col("partition").isin(partitionsToUpdate: _*))
+    sourceDf.persist()
+
+    val availableCounts: Map[String, Long] = sourceDf
+      .groupBy("partition")
+      .count()
+      .collect()
+      .map(row => row.getAs[String]("partition") -> row.getAs[Long]("count"))
+      .toMap
+
+    val effectiveCounts: Seq[(String, Long, Long)] = updateCounts.map { case (partition, desired) =>
+      val available = availableCounts.getOrElse(partition, 0L)
+      require(
+        available > 0,
+        s"Round # $currentRound requests $desired updates for partition '$partition', but no " +
+          s"keys exist for it in external Hudi table '${ext.tablePath}'")
+      if (available < desired) {
+        println(
+          s"WARN: Round # $currentRound requests $desired updates for partition '$partition' " +
+            s"but only $available distinct keys exist in the external table; updating all $available")
+      }
+      (partition, Math.min(desired, available), available)
+    }
+
+    val sampleFractions: Map[String, Double] = effectiveCounts.map {
+      case (partition, desired, available) =>
+        val fraction =
+          if (desired >= available) 1.0
+          else Math.min(1.0, (desired * 1.2 + 100.0) / available)
+        partition -> fraction
+    }.toMap
+    val sampledDF = sourceDf.stat.sampleBy("partition", sampleFractions, SEED + currentRound)
+
+    val desiredDF = effectiveCounts
+      .map { case (partition, desired, _) => (partition, desired) }
+      .toDF("partition", "desired_updates")
+    val perPartitionWindow = Window.partitionBy("partition").orderBy(rand(SEED + currentRound))
+    val pickedDF = sampledDF
+      .withColumn("rn", row_number().over(perPartitionWindow))
+      .join(broadcast(desiredDF), "partition")
+      .filter($"rn" <= $"desired_updates")
+      .drop("rn", "desired_updates")
+    pickedDF.persist()
+    sourceDf.unpersist()
+
+    val pickedCounts: Map[String, Long] = pickedDF
+      .groupBy("partition")
+      .count()
+      .collect()
+      .map(row => row.getAs[String]("partition") -> row.getAs[Long]("count"))
+      .toMap
+    effectiveCounts.foreach { case (partition, desired, _) =>
+      val actual = pickedCounts.getOrElse(partition, 0L)
+      if (actual != desired) {
+        println(
+          s"WARN: Round # $currentRound picked $actual update keys for partition '$partition' " +
+            s"instead of the requested $desired (over-sample undershoot)")
+      }
+    }
+    pickedDF
   }
 
   /**
@@ -719,16 +1067,27 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
    * field: each withColumn adds another projection layer to the plan, and for wide schemas the
    * analyzer cost of the resulting deeply-nested plan dominates the actual work.
    */
-  private def regenerateUpdateValues(rawUpdatesDF: DataFrame, currentRound: Int): DataFrame = {
+  private def regenerateUpdateValues(
+      rawUpdatesDF: DataFrame,
+      currentRound: Int,
+      nullifiedPartitions: Set[String] = Set.empty): DataFrame = {
     val newTs = System.currentTimeMillis()
     val updateSchema = rawUpdatesDF.schema
+    val nullifiedCol =
+      if (nullifiedPartitions.isEmpty) None
+      else Some(col("partition").isin(nullifiedPartitions.toSeq: _*))
+    def maybeNullify(field: StructField, real: Column): Column =
+      nullifiedCol match {
+        case Some(isNullified) => when(isNullified, lit(null).cast(field.dataType)).otherwise(real)
+        case None => real
+      }
     val projectedColumns = updateSchema.fields.map { field =>
       val column = field.name match {
         case "key" | "partition" => col(field.name)
         case "round" => lit(currentRound)
         case "ts" => lit(newTs)
         case _ =>
-          field.dataType match {
+          val real = field.dataType match {
             case StringType => expr("uuid()")
             case LongType => (rand() * Long.MaxValue).cast(LongType)
             case IntegerType => (rand() * Int.MaxValue).cast(IntegerType)
@@ -744,6 +1103,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
                 field.name
               ) // leave complex types (StructType, ArrayType, MapType, BinaryType) unchanged
           }
+          maybeNullify(field, real)
       }
       column.as(field.name)
     }
@@ -946,11 +1306,16 @@ object ChangeDataGenerator {
           case Some(specPath) =>
             val spec =
               FineGrainedWorkloadSpec.fromJsonFile(specPath, spark.sparkContext.hadoopConfiguration)
+            val bootstrapDescription = spec.bootstrap match {
+              case Some(bootstrap) =>
+                s"${bootstrap.numPartitions} bootstrap partitions [${bootstrap.startDate} .. ${bootstrap.endDate}]"
+              case None =>
+                s"external bootstrap (${spec.externalBootstrap.get.tablePath}), round 0 skipped"
+            }
             println(
               s"Using fine-grained workload spec from $specPath: " +
-                s"${spec.totalRounds} rounds (1 bootstrap + ${spec.commits.size} commits), " +
-                s"${spec.bootstrap.numPartitions} bootstrap partitions " +
-                s"[${spec.bootstrap.startDate} .. ${spec.bootstrap.endDate}]. " +
+                s"${spec.totalRounds - spec.startRound} rounds starting at round ${spec.startRound} " +
+                s"(${spec.commits.size} commits), $bootstrapDescription. " +
                 "Flags --number-rounds, --number-records-per-round, --update-ratio, " +
                 "--total-partitions, --partition-distribution, --update-pattern and " +
                 "--num-partitions-to-update are ignored in this mode.")
@@ -963,7 +1328,11 @@ object ChangeDataGenerator {
               targetDataFileSize = config.targetDataFileSize,
               skipIfExists = config.skipIfExists,
               keyType = config.keyType,
-              startRound = config.startRound,
+              // config.startRound defaults to 0 whether or not the user passed --start-round;
+              // treat the default as "unset" so externalBootstrap specs (whose valid start round
+              // is 1, not 0) get the right default without requiring --start-round 1 on every
+              // invocation. An explicit non-zero --start-round always passes through as-is.
+              startRound = if (config.startRound == 0) -1 else config.startRound,
               avroSchemaPath = config.avroSchemaPath)
 
           case None =>

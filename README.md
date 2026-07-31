@@ -115,7 +115,8 @@ ingestion patterns captured from actual commit metadata.
     {
       "2026-02-01": {"updates": 5000}
     }
-  ]
+  ],
+  "nullifiedPartitions": ["2026-01-15", "2026-01-16"]
 }
 ```
 
@@ -132,13 +133,72 @@ ingestion patterns captured from actual commit metadata.
 * **Inserts** may open brand-new partitions outside the bootstrap date range (e.g. new daily
   partitions arriving over time).
 * Counts are **exact**, not probabilistic — unlike the distribution-based mode.
-* The number of rounds is derived from the spec (`1 + commits.length`).
+* The number of rounds is derived from the spec (`1 + commits.length`, or just `commits.length`
+  under [External Bootstrap Mode](#external-bootstrap-mode)).
 * **Validation is strict and fails at parse time**: malformed dates, negative counts,
   all-zero entries, unknown/typo'd field names, updates targeting partitions with no prior
   data, and duplicate partition dates within a commit (repeated JSON keys would otherwise
   silently collapse to the last occurrence) are all rejected with descriptive errors.
 * With `--skip-if-exists`, a rerun where every round already exists skips generation
   entirely — including the sample-write record-size estimation for custom Avro schemas.
+* **Optional top-level `nullifiedPartitions`**: an array of `yyyy-MM-dd` partition dates whose
+  generated records have every field nulled out except the identity fields
+  (`key`/`partition`/`round`/`ts`). Useful for replicating a real table's full partition
+  count / RLI-shard footprint without paying the on-disk cost of fully-populated records for
+  cold/historical partitions that never receive real incremental traffic.
+
+### External Bootstrap Mode
+
+By default, round 0 is generated locally by lake-loader itself (the `bootstrap` field above).
+An opt-in alternative, `externalBootstrap`, skips round 0 entirely and instead treats an
+**already-populated Hudi table** as the bootstrap — e.g. a real production snapshot, or a
+single `bulk_insert` shared across multiple benchmark variants (baseline vs. Quanton) so each
+variant doesn't have to regenerate and reload an identical bootstrap dataset.
+
+Exactly one of `bootstrap` or `externalBootstrap` must be present in the spec.
+
+```json
+{
+  "externalBootstrap": {
+    "tablePath": "s3a://bucket/existing-hudi-table",
+    "payloadPoolMultiplier": 2.0,
+    "recordKeyField": "_hoodie_record_key",
+    "partitionPathField": "_hoodie_partition_path",
+    "suffixKeyWithPartitionPath": false
+  },
+  "commits": [
+    {"2026-01-01": {"inserts": 1000, "updates": 500}}
+  ]
+}
+```
+
+**Fields** (all but `tablePath` optional, defaults shown above):
+* `tablePath` (required) — path to the pre-populated Hudi table.
+* `payloadPoolMultiplier` (default `2.0`, must be ≥ `1.0`) — a single pool of payload rows
+  (data columns only, no key/partition/round/ts) is generated once per job, sized to
+  `ceil(payloadPoolMultiplier * maxDemand)` where `maxDemand` is the largest single
+  `(partition, commit)` `inserts + updates` count across the whole spec. Every commit samples
+  its rows from this shared pool (with replacement) instead of regenerating payload data.
+* `recordKeyField` / `partitionPathField` — column names to read back from the external table
+  for update targets; default to Hudi's own meta-field names.
+* `suffixKeyWithPartitionPath` (default `false`) — when `true`, new-insert keys are generated
+  as `<uuid>_<partitionPath>` instead of the normal `--primary-key-type` scheme. This matches a
+  bootstrap built by generating real data for a single partition and copying it verbatim to
+  every other partition, rewriting only the key to stay globally unique. Update keys are
+  unaffected either way — they're always reused verbatim from the external table.
+
+**Semantics**:
+* Round numbering starts at 1 (round 0 is never generated); the number of rounds equals
+  `commits.length`.
+* Update targets for every commit are read back from the **live external table at datagen
+  time** (partition- and column-pruned; works whether or not the table has a Record Level
+  Index) — not from lake-loader's own previously-generated round directories. So a workload
+  spec must only request updates on partitions that were already populated in the external
+  table's original bootstrap snapshot — not on partitions that only gained records from an
+  earlier lake-loader round that hasn't actually been loaded into the external table yet.
+* The "updates can only target partitions with prior data" validation that applies to the
+  `bootstrap` mode is skipped entirely — any partition referenced by a commit's `updates` is
+  assumed to already exist in the external table.
 
 **CLI example**:
 ```bash

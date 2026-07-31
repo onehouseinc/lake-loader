@@ -14,7 +14,7 @@
 
 package ai.onehouse.lakeloader
 
-import ai.onehouse.lakeloader.configs.{FineGrainedWorkloadSpec, PartitionOps}
+import ai.onehouse.lakeloader.configs.{ExternalBootstrapSpec, FineGrainedWorkloadSpec, PartitionOps}
 import org.scalatest.funsuite.AnyFunSuite
 
 import java.time.LocalDate
@@ -41,14 +41,15 @@ class FineGrainedWorkloadSpecTest extends AnyFunSuite {
       |  ]
       |}""".stripMargin)
 
-    assert(spec.bootstrap.startDate == LocalDate.parse("2026-01-01"))
-    assert(spec.bootstrap.endDate == LocalDate.parse("2026-01-05"))
-    assert(spec.bootstrap.totalRecords == 1000L)
-    assert(spec.bootstrap.numPartitions == 5)
+    assert(spec.bootstrap.get.startDate == LocalDate.parse("2026-01-01"))
+    assert(spec.bootstrap.get.endDate == LocalDate.parse("2026-01-05"))
+    assert(spec.bootstrap.get.totalRecords == 1000L)
+    assert(spec.bootstrap.get.numPartitions == 5)
     assert(
-      spec.bootstrap.partitionValues ==
+      spec.bootstrap.get.partitionValues ==
         List("2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04", "2026-01-05"))
     assert(spec.totalRounds == 3)
+    assert(spec.startRound == 0)
     // partition entries are sorted ascending by date within a commit
     assert(
       spec.commits.head.partitionOps == List(
@@ -77,8 +78,18 @@ class FineGrainedWorkloadSpecTest extends AnyFunSuite {
     expectInvalid("{not json", "not valid JSON")
   }
 
-  test("missing bootstrap is rejected") {
-    expectInvalid("""{"commits": []}""", "must have a 'bootstrap' object")
+  test("missing bootstrap and externalBootstrap is rejected") {
+    expectInvalid(
+      """{"commits": []}""",
+      "must have exactly one of 'bootstrap' or 'externalBootstrap'")
+  }
+
+  test("specifying both bootstrap and externalBootstrap is rejected") {
+    expectInvalid(
+      """{"bootstrap": {"startDate": "2026-01-01", "endDate": "2026-01-01", "totalRecords": 10},
+        | "externalBootstrap": {"tablePath": "hdfs://x/table"},
+        | "commits": [{"2026-01-01": {"updates": 5}}]}""".stripMargin,
+      "must have exactly one of 'bootstrap' or 'externalBootstrap'")
   }
 
   test("bad date format is rejected") {
@@ -187,5 +198,85 @@ class FineGrainedWorkloadSpecTest extends AnyFunSuite {
       """{"bootstrap": {"startDate": "2026-01-01", "endDate": "2026-01-05", "totalRecords": 10},
         | "commits": [{"2027-06-15": {"inserts": 5}}]}""".stripMargin)
     assert(spec.commits.head.partitionOps == List(("2027-06-15", PartitionOps(5, 0))))
+  }
+
+  test("valid externalBootstrap spec parses with round numbering starting at 1") {
+    val spec = parse("""
+      |{
+      |  "externalBootstrap": {"tablePath": "hdfs://x/table"},
+      |  "commits": [
+      |    {"2026-01-01": {"inserts": 10, "updates": 5}},
+      |    {"2026-01-02": {"updates": 3}}
+      |  ]
+      |}""".stripMargin)
+    assert(spec.bootstrap.isEmpty)
+    assert(spec.externalBootstrap.contains(ExternalBootstrapSpec("hdfs://x/table")))
+    assert(spec.startRound == 1)
+    assert(spec.totalRounds == 3)
+  }
+
+  test("externalBootstrap defaults: payloadPoolMultiplier=2.0, hoodie meta field names") {
+    val spec = parse("""
+      |{
+      |  "externalBootstrap": {"tablePath": "hdfs://x/table"},
+      |  "commits": [{"2026-01-01": {"inserts": 5}}]
+      |}""".stripMargin)
+    val ext = spec.externalBootstrap.get
+    assert(ext.payloadPoolMultiplier == 2.0)
+    assert(ext.recordKeyField == "_hoodie_record_key")
+    assert(ext.partitionPathField == "_hoodie_partition_path")
+    assert(ext.suffixKeyWithPartitionPath == false)
+  }
+
+  test("externalBootstrap.suffixKeyWithPartitionPath can be enabled") {
+    val spec = parse("""
+      |{
+      |  "externalBootstrap": {"tablePath": "hdfs://x/table", "suffixKeyWithPartitionPath": true},
+      |  "commits": [{"2026-01-01": {"inserts": 5}}]
+      |}""".stripMargin)
+    assert(spec.externalBootstrap.get.suffixKeyWithPartitionPath == true)
+  }
+
+  test("externalBootstrap fields can be overridden") {
+    val spec = parse("""
+      |{
+      |  "externalBootstrap": {
+      |    "tablePath": "hdfs://x/table",
+      |    "payloadPoolMultiplier": 3.5,
+      |    "recordKeyField": "my_key",
+      |    "partitionPathField": "my_partition"
+      |  },
+      |  "commits": [{"2026-01-01": {"inserts": 5}}]
+      |}""".stripMargin)
+    val ext = spec.externalBootstrap.get
+    assert(ext.payloadPoolMultiplier == 3.5)
+    assert(ext.recordKeyField == "my_key")
+    assert(ext.partitionPathField == "my_partition")
+  }
+
+  test("externalBootstrap.payloadPoolMultiplier below 1.0 is rejected") {
+    expectInvalid(
+      """{"externalBootstrap": {"tablePath": "hdfs://x/table", "payloadPoolMultiplier": 0.5},
+        | "commits": [{"2026-01-01": {"inserts": 5}}]}""".stripMargin,
+      "payloadPoolMultiplier must be >= 1.0")
+  }
+
+  test("unknown field in externalBootstrap is rejected (typo guard)") {
+    expectInvalid(
+      """{"externalBootstrap": {"tablePath": "hdfs://x/table", "tablepath": "typo"},
+        | "commits": [{"2026-01-01": {"inserts": 5}}]}""".stripMargin,
+      "Unknown field 'tablepath'")
+  }
+
+  test("externalBootstrap skips the bootstrap-population check for updates") {
+    // Would fail validateUpdateTargets under a normal bootstrap spec (no bootstrap range, no
+    // earlier insert), but externalBootstrap assumes the partition already exists in the
+    // external table, so this must parse without error.
+    val spec = parse("""
+      |{
+      |  "externalBootstrap": {"tablePath": "hdfs://x/table"},
+      |  "commits": [{"2026-01-01": {"updates": 5}}]
+      |}""".stripMargin)
+    assert(spec.commits.head.partitionOps == List(("2026-01-01", PartitionOps(0, 5))))
   }
 }

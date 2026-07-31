@@ -28,11 +28,66 @@ import scala.util.Random
 object ComplexDataGenerator extends Serializable {
 
   private val NULL_PROBABILITY = 0.2
-  private val COLLECTION_NULL_PROBABILITY = 0.4
+  private val COLLECTION_NULL_PROBABILITY = 0.6
+
+  /** Fixed identity fields set directly by [[generateRow]]/[[attachIdentity]], never generated. */
+  val IDENTITY_FIELDS: Set[String] = Set("key", "partition", "round", "ts")
+
+  /**
+   * Generate a primary key string per [[KeyType]]. Extracted out of [[generateRow]] so the
+   * external-bootstrap datagen path (which stitches identity onto pre-generated payload rows
+   * rather than generating a full row at once) can mint new insert keys with the exact same
+   * scheme.
+   */
+  def generateKey(keyType: KeyType, round: Int, ts: Long, random: Random): String =
+    keyType match {
+      case KeyTypes.TemporallyOrdered =>
+        s"${ts}-${UUID.randomUUID()}-${"%03d".format(round)}"
+      case KeyTypes.Random =>
+        s"${UUID.randomUUID()}-${"%03d".format(round)}"
+      case _ => throw new UnsupportedOperationException(s"$keyType not supported")
+    }
+
+  /**
+   * Reassemble a full-schema Row from a payload row (i.e. `fullSchema` minus [[IDENTITY_FIELDS]],
+   * same field order) plus explicit identity values. Used by the external-bootstrap datagen path:
+   * payload data is generated once into a shared pool with identity columns dropped, then sampled
+   * rows are re-keyed here for each round/partition without regenerating the payload itself.
+   */
+  def attachIdentity(
+      payloadRow: Row,
+      fullSchema: StructType,
+      key: String,
+      partition: String,
+      round: Int,
+      ts: Long): Row = {
+    val payloadFieldIndex = fullSchema.fields
+      .filterNot(f => IDENTITY_FIELDS.contains(f.name))
+      .zipWithIndex
+      .map { case (f, i) => f.name -> i }
+      .toMap
+    val values = fullSchema.fields.map { field =>
+      field.name match {
+        case "key" => key
+        case "partition" => partition
+        case "round" => round
+        case "ts" => ts
+        case name => payloadRow.get(payloadFieldIndex(name))
+      }
+    }
+    Row.fromSeq(values)
+  }
 
   /**
    * Generate a Row for the given schema, with special handling for the standard
    * key/partition/round/ts fields, and type-based generation for all other fields.
+   *
+   * @param nullifyDataFields when true, every field except key/partition/round/ts is set to
+   *                          `null` directly (bypassing [[generateValue]] entirely, including for
+   *                          array/map fields, which are otherwise never nulled) -- used to
+   *                          produce near-empty-on-disk records for partitions that need to exist
+   *                          (matching a real table's partition count) but not carry realistic
+   *                          data volume.
    */
   def generateRow(
       schema: StructType,
@@ -41,15 +96,10 @@ object ComplexDataGenerator extends Serializable {
       partitionDistributionCDF: List[Double],
       keyType: KeyType,
       recordSize: Int,
-      random: Random): Row = {
+      random: Random,
+      nullifyDataFields: Boolean = false): Row = {
     val ts = System.currentTimeMillis()
-    val key = keyType match {
-      case KeyTypes.TemporallyOrdered =>
-        s"${ts}-${UUID.randomUUID()}-${"%03d".format(round)}"
-      case KeyTypes.Random =>
-        s"${UUID.randomUUID()}-${"%03d".format(round)}"
-      case _ => throw new UnsupportedOperationException(s"$keyType not supported")
-    }
+    val key = generateKey(keyType, round, ts, random)
     val partition = partitionPaths(sampleFromCDF(partitionDistributionCDF, random.nextDouble()))
     val sizeFactor = Math.max(recordSize / schema.fields.length, 1)
 
@@ -59,6 +109,7 @@ object ComplexDataGenerator extends Serializable {
         case "partition" => partition
         case "round" => round
         case "ts" => ts
+        case _ if nullifyDataFields => null
         case _ => generateValue(field.dataType, field.nullable, sizeFactor, random)
       }
     }
@@ -130,12 +181,12 @@ object ComplexDataGenerator extends Serializable {
         Row.fromSeq(st.fields.map(f => generateValue(f.dataType, f.nullable, childSizeFactor, random)))
 
       case ArrayType(elementType, containsNull) =>
-        val size = 1 + random.nextInt(4)
+        val size = 1 + random.nextInt(3)
         val childSizeFactor = Math.max(sizeFactor / 4, 1)
         (0 until size).map(_ => generateValue(elementType, containsNull, childSizeFactor, random)).toArray
 
       case MapType(keyType, valueType, valueContainsNull) =>
-        val size = 1 + random.nextInt(3)
+        val size = 1 + random.nextInt(2)
         val childSizeFactor = Math.max(sizeFactor / 4, 1)
         (0 until size).map { _ =>
           val k = keyType match {
