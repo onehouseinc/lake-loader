@@ -97,13 +97,31 @@ case class BootstrapSpec(
  *                                   the incremental batches then follow the same convention.
  *                                   Update keys are unaffected either way: they are always reused
  *                                   verbatim from the external table.
+ * @param sharedKeyPrefixAcrossPartitions when true (default), assumes the external table's
+ *                                   `suffixKeyWithPartitionPath` keys were built by generating one
+ *                                   partition's rows and copying them verbatim to every other
+ *                                   partition, rewriting only the `_<partitionPath>` suffix -- so
+ *                                   every partition shares the exact same `<uuid>-<round>` prefix
+ *                                   set. Under that assumption, update keys can be reconstructed
+ *                                   cheaply from a single reference partition's keys (see
+ *                                   `ChangeDataGenerator.buildExternalBootstrapUpdateKeyPrefixes`)
+ *                                   instead of reading every partition needing updates. Set this to
+ *                                   false when the external table's fan-out generated independent
+ *                                   keys per partition (e.g. `ParquetPartitionRewriteJob
+ *                                   --key-mode RANDOM`) -- the shared-prefix assumption does not
+ *                                   hold there, and reconstructed keys would not exist in the
+ *                                   target partition (silently turning intended updates into
+ *                                   inserts). When false, update keys are always read back verbatim
+ *                                   per partition (the legacy/general path), regardless of
+ *                                   `suffixKeyWithPartitionPath`.
  */
 case class ExternalBootstrapSpec(
     tablePath: String,
     payloadPoolMultiplier: Double = 2.0,
-    recordKeyField: String = "_hoodie_record_key",
-    partitionPathField: String = "_hoodie_partition_path",
-    suffixKeyWithPartitionPath: Boolean = false)
+    recordKeyField: String = "key",
+    partitionPathField: String = "partition",
+    suffixKeyWithPartitionPath: Boolean = false,
+    sharedKeyPrefixAcrossPartitions: Boolean = true)
 
 /**
  * Fine-grained workload spec: a bootstrap round followed by N commits, each prescribing
@@ -251,7 +269,8 @@ object FineGrainedWorkloadSpec {
           "payloadPoolMultiplier",
           "recordKeyField",
           "partitionPathField",
-          "suffixKeyWithPartitionPath"),
+          "suffixKeyWithPartitionPath",
+          "sharedKeyPrefixAcrossPartitions"),
         "'externalBootstrap'")
 
       val tablePath = requiredText(node, "tablePath", "externalBootstrap")
@@ -268,11 +287,11 @@ object FineGrainedWorkloadSpec {
         s"externalBootstrap.payloadPoolMultiplier must be >= 1.0, got $payloadPoolMultiplier")
       val recordKeyField = {
         val value = node.get("recordKeyField")
-        if (value == null || value.isNull) "_hoodie_record_key" else value.asText()
+        if (value == null || value.isNull) "key" else value.asText()
       }
       val partitionPathField = {
         val value = node.get("partitionPathField")
-        if (value == null || value.isNull) "_hoodie_partition_path" else value.asText()
+        if (value == null || value.isNull) "partition" else value.asText()
       }
       val suffixKeyWithPartitionPath = {
         val value = node.get("suffixKeyWithPartitionPath")
@@ -284,13 +303,24 @@ object FineGrainedWorkloadSpec {
           value.asBoolean()
         }
       }
+      val sharedKeyPrefixAcrossPartitions = {
+        val value = node.get("sharedKeyPrefixAcrossPartitions")
+        if (value == null || value.isNull) true
+        else {
+          require(
+            value.isBoolean,
+            "'externalBootstrap.sharedKeyPrefixAcrossPartitions' must be a boolean")
+          value.asBoolean()
+        }
+      }
       Some(
         ExternalBootstrapSpec(
           tablePath,
           payloadPoolMultiplier,
           recordKeyField,
           partitionPathField,
-          suffixKeyWithPartitionPath))
+          suffixKeyWithPartitionPath,
+          sharedKeyPrefixAcrossPartitions))
     }
   }
 

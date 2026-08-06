@@ -31,7 +31,6 @@ import ai.onehouse.lakeloader.utils.StringUtils.lineSepBold
 
 import java.io.Serializable
 import java.time.LocalDate
-import java.util.UUID.randomUUID
 
 import scala.util.Random
 
@@ -45,6 +44,17 @@ import scala.util.Random
 class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) extends Serializable {
 
   private val SEED: Long = 378294793957830L
+
+  // Sizing rule for buildExternalBootstrapUpdateKeyPool's sampled pool: sample enough keys to
+  // cover the largest single round's update request for a partition, plus headroom, rather than
+  // reading the partition's full key population -- see that method's scaladoc.
+  private val UPDATE_POOL_MIN_SIZE: Long = 1000
+  private val UPDATE_POOL_OVERSAMPLE_THRESHOLD: Long = 3500
+  private val UPDATE_POOL_OVERSAMPLE_MULTIPLIER: Long = 5
+
+  private[lakeloader] def targetUpdatePoolSize(maxNeeded: Long): Long =
+    if (maxNeeded > UPDATE_POOL_OVERSAMPLE_THRESHOLD) maxNeeded * UPDATE_POOL_OVERSAMPLE_MULTIPLIER
+    else Math.max(UPDATE_POOL_MIN_SIZE, maxNeeded)
 
   import spark.implicits._
 
@@ -274,8 +284,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
    *
    * When `spec.externalBootstrap` is set instead of `spec.bootstrap`, round 0 is never generated
    * (generation starts at round 1, per `spec.startRound`) and updates instead sample real
-   * `_hoodie_record_key` values back from the pre-populated external Hudi table named by the
-   * spec. See [[generateExternalBootstrapRound]].
+   * record-key values back from the pre-populated external Hudi table named by the spec. See
+   * [[generateExternalBootstrapRound]].
    *
    * Unlike [[generateWorkload]] (which samples partitions from a probability distribution),
    * this path produces deterministic, exact per-partition record counts.
@@ -355,6 +365,38 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       schema,
       targetDataFileSize)
 
+    // Gates the shared-prefix fast path (see below): only safe when both are true -- see
+    // ExternalBootstrapSpec.sharedKeyPrefixAcrossPartitions's scaladoc.
+    val usesSharedKeyPrefixFastPath: Boolean =
+      spec.externalBootstrap.exists(e =>
+        e.suffixKeyWithPartitionPath && e.sharedKeyPrefixAcrossPartitions)
+
+    // Also built once, reused by every round: see buildExternalBootstrapUpdateKeyPool's
+    // scaladoc. Must not be evicted by a per-round spark.catalog.clearCache() (see below).
+    // Only used when the fast path below isn't usable (suffixKeyWithPartitionPath=false, or
+    // sharedKeyPrefixAcrossPartitions=false because the external table's fan-out didn't preserve
+    // an identical key prefix set across partitions -- e.g. ParquetPartitionRewriteJob
+    // --key-mode RANDOM) -- see externalBootstrapUpdateKeyPrefixes for the fast path.
+    lazy val externalBootstrapUpdateKeyPool: DataFrame =
+      if (usesSharedKeyPrefixFastPath)
+        spark.emptyDataFrame
+      else buildExternalBootstrapUpdateKeyPool(spec.externalBootstrap.get, spec.commits)
+
+    // Fast path used only when suffixKeyWithPartitionPath AND sharedKeyPrefixAcrossPartitions are
+    // both true: every partition's keys share the same <uuid>-<round> prefix (see
+    // partitionSuffixedKey's scaladoc), so a single reference partition's keys -- with their
+    // suffix stripped -- can stand in for every partition's key pool. See
+    // buildExternalBootstrapUpdateKeyPrefixes's scaladoc for why this is only safe under that
+    // combination -- if the external table's fan-out generated independent keys per partition
+    // (sharedKeyPrefixAcrossPartitions=false), reconstructed keys would not exist in the target
+    // partition and updates would silently become inserts.
+    lazy val externalBootstrapUpdateKeyPrefixes: Option[Array[String]] =
+      if (usesSharedKeyPrefixFastPath)
+        buildExternalBootstrapUpdateKeyPrefixes(spec.externalBootstrap.get, spec.commits)
+      else None
+
+    var forcedExternalBootstrapCaches = false
+
     (effectiveStartRound until totalRounds).foreach(curRound => {
       val targetLocation = s"$path/$curRound"
       val targetLocationPath = new Path(targetLocation)
@@ -380,6 +422,7 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
         val targetParallelism =
           Math.max(2, Math.ceil(estimatedTotalBytes / targetDataFileSize).toInt)
         val (payloadPoolDF, poolSize) = externalBootstrapPool
+        forcedExternalBootstrapCaches = true
 
         println(s"""
              |$lineSepBold
@@ -393,6 +436,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
           curRound,
           commit,
           ext,
+          externalBootstrapUpdateKeyPool,
+          externalBootstrapUpdateKeyPrefixes,
           payloadPoolDF,
           poolSize,
           schema,
@@ -407,8 +452,12 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
             .mode(SaveMode.Overwrite)
             .save(targetLocation)
         }
+        // Only unpersist this round's own exact-sample intermediate here -- the shared payload
+        // pool and per-partition update-key pools live for the whole job and are cleaned up once,
+        // after the round loop finishes (a spark.catalog.clearCache() here would wipe them out
+        // and force them to be recomputed, i.e. re-read from the external Hudi table, every
+        // round -- exactly what these caches exist to avoid).
         persistedIntermediates.foreach(_.unpersist())
-        spark.catalog.clearCache()
       } else {
         val (insertCounts, updateCounts) =
           if (curRound == 0) {
@@ -487,6 +536,16 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
         spark.catalog.clearCache()
       }
     })
+
+    // The shared payload pool and update-key pool live for the whole job (see their build-site
+    // comments for why they must survive the per-round unpersist above); clean them up once here,
+    // but only if some round actually forced them -- a fully skip-if-exists rerun never touches
+    // externalBootstrap* at all, and forcing the lazy vals just to unpersist them would trigger
+    // the very reads/generation they exist to avoid.
+    if (forcedExternalBootstrapCaches) {
+      externalBootstrapPool._1.unpersist()
+      externalBootstrapUpdateKeyPool.unpersist()
+    }
   }
 
   /**
@@ -507,8 +566,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
    * boundaries — unlike the CDF-sampling path, per-partition counts are exact, not expected
    * values.
    *
-   * @param suffixKeyWithPartitionPath when true, keys are minted as `<uuid>_<partition>` rather
-   *                                   than by `keyType` (see
+   * @param suffixKeyWithPartitionPath when true, keys are minted as `<uuid>-<round>_<partition>`
+   *                                   rather than by `keyType` (see
    *                                   [[ComplexDataGenerator.partitionSuffixedKey]]).
    */
   private def generateExactInserts(
@@ -564,7 +623,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
    * `(key, partition)` pairs — the payload is attached later from the shared pool via
    * [[generateExternalBootstrapRound]].
    *
-   * @param suffixKeyWithPartitionPath when true, generate `<uuid>_<partition>` keys instead of
+   * @param suffixKeyWithPartitionPath when true, generate `<uuid>-<round>_<partition>` keys via
+   *                                   [[ComplexDataGenerator.partitionSuffixedKey]] instead of
    *                                   the normal `keyType`-based scheme (see
    *                                   [[ExternalBootstrapSpec.suffixKeyWithPartitionPath]]).
    */
@@ -594,7 +654,13 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
           val partitionIdx = if (searched >= 0) searched else -searched - 1
           val partitionValue = partitionValues(partitionIdx)
           val key =
-            if (suffixKeyWithPartitionPath) s"${randomUUID()}_$partitionValue"
+            if (suffixKeyWithPartitionPath)
+              ComplexDataGenerator.partitionSuffixedKey(
+                keyType,
+                curRound,
+                System.currentTimeMillis(),
+                random,
+                partitionValue)
             else
               ComplexDataGenerator.generateKey(
                 keyType,
@@ -704,6 +770,8 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       curRound: Int,
       commit: CommitSpec,
       ext: ExternalBootstrapSpec,
+      updateKeyPool: DataFrame,
+      updateKeyPrefixes: Option[Array[String]],
       payloadPoolDF: DataFrame,
       poolSize: Long,
       schema: StructType,
@@ -731,8 +799,18 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     val (updateKeysDF, updatePersisted) =
       if (numUpdates == 0) {
         (spark.createDataFrame(spark.sparkContext.emptyRDD[Row], keySchema), Seq.empty[DataFrame])
+      } else if (ext.suffixKeyWithPartitionPath && ext.sharedKeyPrefixAcrossPartitions) {
+        val picked = sampleExternalBootstrapUpdateKeysFromPrefixes(
+          updateKeyPrefixes.getOrElse(
+            throw new IllegalStateException(
+              "suffixKeyWithPartitionPath and sharedKeyPrefixAcrossPartitions are both set and " +
+                "updates were requested, but no shared key prefixes were built; expected " +
+                "buildExternalBootstrapUpdateKeyPrefixes to have run")),
+          updateCounts,
+          curRound)
+        (picked, Seq.empty[DataFrame])
       } else {
-        val picked = getExactPerPartitionUpdatesFromHudi(ext, updateCounts, curRound)
+        val picked = sampleExternalBootstrapUpdateKeys(updateKeyPool, updateCounts, curRound)
         (picked.select("key", "partition"), Seq(picked))
       }
 
@@ -756,31 +834,211 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
   }
 
   /**
-   * Like [[getExactPerPartitionUpdates]], but sources candidate keys from a pre-populated
-   * external Hudi table instead of previously-generated round directories: reads
-   * `recordKeyField`/`partitionPathField` (partition- and column-pruned; works with or without
-   * the Record Level Index, since Spark's ordinary partition pruning plus Parquet column pruning
-   * apply either way), then applies the exact same stratified-sample-then-trim technique to hit
-   * exact per-partition counts. No `rank()`-by-round de-duplication is needed here (unlike the
-   * normal path) since the Hudi table already holds only the latest version of each key.
+   * Sample enough of the external Hudi table's current keys, per partition, to cover the largest
+   * single round's update request for that partition (plus headroom via
+   * [[targetUpdatePoolSize]]), and return them as one persisted `DataFrame` reused by every round
+   * (via [[sampleExternalBootstrapUpdateKeys]]).
+   *
+   * Only used when the shared-prefix fast path isn't usable (`suffixKeyWithPartitionPath=false`,
+   * or `sharedKeyPrefixAcrossPartitions=false`); see [[buildExternalBootstrapUpdateKeyPrefixes]]
+   * for the fast path used when both are true, which reads just one partition instead of N.
+   *
+   * Reading every key in every partition needing updates does not scale -- at high per-partition
+   * record counts (tens of millions of records/partition x hundreds of partitions) that's
+   * terabytes of key data to persist just to sample a few thousand updates per round. Instead this
+   * does two lightweight passes over the table, both partition-pruned to just the partitions
+   * needing updates:
+   *
+   *   1. Count actual rows per partition (projected to just the partition column, which is
+   *      typically low-cardinality/dictionary-encoded in Parquet, so this is far cheaper than
+   *      reading the key column).
+   *   2. Read `(partition, key)`, and apply a per-partition sample fraction
+   *      (`targetPoolSize(partition) / actualCount(partition)`, capped at 1.0) via
+   *      `DataFrame.stat.sampleBy` -- the same idiom already used in
+   *      [[sampleExternalBootstrapUpdateKeys]] -- so a single read produces a correctly-sized pool
+   *      for every partition in one pass, rather than one read per partition.
+   *
+   * Capping the fraction at 1.0 means a partition smaller than its target pool size degrades to
+   * "read the whole partition," so this is also correct (if less useful as an optimization) for
+   * partitions much smaller than `targetPoolSize` -- e.g. in unit tests.
+   *
+   * This is a point-in-time snapshot: because it is read before any round is generated, and the
+   * external table is not itself modified during datagen (loading happens afterward, as a
+   * separate job), every round samples from the same key set -- see "Known limitations" in
+   * EFFICIENT_BOOTSTRAP.md.
    */
-  private def getExactPerPartitionUpdatesFromHudi(
+  private def buildExternalBootstrapUpdateKeyPool(
       ext: ExternalBootstrapSpec,
+      commits: List[CommitSpec]): DataFrame = {
+    val maxNeededByPartition: Map[String, Long] = commits
+      .flatMap(_.partitionOps.collect { case (p, ops) if ops.updates > 0 => p -> ops.updates })
+      .groupBy(_._1)
+      .map { case (p, vs) => p -> vs.map(_._2).max }
+    if (maxNeededByPartition.isEmpty) {
+      spark.emptyDataFrame
+    } else {
+      val partitionsNeedingUpdates = maxNeededByPartition.keys.toSeq
+      val targetPoolSize: Map[String, Long] =
+        maxNeededByPartition.map { case (p, needed) => p -> targetUpdatePoolSize(needed) }
+
+      val actualCounts: Map[String, Long] = spark.read
+        .format("hudi")
+        .load(ext.tablePath)
+        .select(col(ext.partitionPathField).as("partition"))
+        .filter(col("partition").isin(partitionsNeedingUpdates: _*))
+        .groupBy("partition")
+        .count()
+        .collect()
+        .map(row => row.getAs[String]("partition") -> row.getAs[Long]("count"))
+        .toMap
+
+      val fractions: Map[String, Double] = targetPoolSize.map { case (p, target) =>
+        p -> Math.min(1.0, target.toDouble / actualCounts.getOrElse(p, 0L).max(1L).toDouble)
+      }
+
+      println(
+        s"Sampling existing keys from external Hudi table '${ext.tablePath}' once for " +
+          s"${partitionsNeedingUpdates.size} partition(s) needing updates, reused across all " +
+          s"rounds (target pool sizes: ${targetPoolSize.mkString(", ")})")
+
+      val pool = spark.read
+        .format("hudi")
+        .load(ext.tablePath)
+        .select(col(ext.partitionPathField).as("partition"), col(ext.recordKeyField).as("key"))
+        .filter(col("partition").isin(partitionsNeedingUpdates: _*))
+        .stat
+        .sampleBy("partition", fractions, SEED)
+      pool.persist()
+
+      val sampledCounts: Map[String, Long] = pool
+        .groupBy("partition")
+        .count()
+        .collect()
+        .map(row => row.getAs[String]("partition") -> row.getAs[Long]("count"))
+        .toMap
+      targetPoolSize.foreach { case (partition, target) =>
+        val sampled = sampledCounts.getOrElse(partition, 0L)
+        require(
+          sampled > 0,
+          s"Some commit requests updates for partition '$partition', but sampling produced no " +
+            s"keys for it from external Hudi table '${ext.tablePath}'")
+        if (sampled < target) {
+          println(
+            s"WARN: sampled update-key pool for partition '$partition' has only $sampled keys, " +
+              s"target was $target (actual partition size may be smaller than the target, or " +
+              "sampling variance undershot -- fine as long as it still covers the largest " +
+              "single round's update request for this partition)")
+        }
+      }
+      pool
+    }
+  }
+
+
+  /**
+   * Fast path used only when `suffixKeyWithPartitionPath` is true: because every partition's keys
+   * are `<uuid>-<round>_<partitionPath>` (see [[ComplexDataGenerator.partitionSuffixedKey]]'s
+   * scaladoc) sharing an identical `<uuid>-<round>` prefix across every partition -- a byproduct of
+   * how such a bootstrap is fanned out (one partition's rows copied to every other partition,
+   * rewriting only the suffix) -- a single reference partition's keys, with their suffix stripped,
+   * stand in for every partition's key set. This avoids [[buildExternalBootstrapUpdateKeyPool]]'s
+   * table reads (still partition-pruned to just the needed partitions, but still real I/O) in
+   * favor of exactly one partition read, which matters at
+   * scales with many thousands of partitions.
+   *
+   * Returns `None` (no updates requested anywhere) or `Some(prefixes)`, where `prefixes` is kept
+   * only on the driver -- a plain `Array[String]`, not a persisted DataFrame -- since it's reused
+   * via cheap driver-side sampling (see [[sampleExternalBootstrapUpdateKeysFromPrefixes]]) rather
+   * than a Spark join.
+   */
+  private def buildExternalBootstrapUpdateKeyPrefixes(
+      ext: ExternalBootstrapSpec,
+      commits: List[CommitSpec]): Option[Array[String]] = {
+    val partitionsNeedingUpdates =
+      commits.flatMap(_.partitionOps.collect { case (p, ops) if ops.updates > 0 => p }).distinct
+    if (partitionsNeedingUpdates.isEmpty) {
+      None
+    } else {
+      val referencePartition = partitionsNeedingUpdates.head
+      println(
+        s"Reading existing keys from external Hudi table '${ext.tablePath}' once, from " +
+          s"reference partition '$referencePartition', to derive the shared key prefix reused by " +
+          s"every partition (suffixKeyWithPartitionPath=true)")
+      val suffixLen = referencePartition.length + 1 // "_" + partition
+      val prefixes = spark.read
+        .format("hudi")
+        .load(ext.tablePath)
+        .filter(col(ext.partitionPathField) === referencePartition)
+        .select(
+          expr(
+            s"substring(${ext.recordKeyField}, 1, length(${ext.recordKeyField}) - $suffixLen)")
+            .as("prefix"))
+        .rdd
+        .map(_.getString(0))
+        .collect()
+      require(
+        prefixes.nonEmpty,
+        s"Some commit requests updates for partition '$referencePartition', but no keys exist " +
+          s"for it in external Hudi table '${ext.tablePath}'")
+      Some(prefixes)
+    }
+  }
+
+  /**
+   * Like [[sampleExternalBootstrapUpdateKeys]], but for the [[buildExternalBootstrapUpdateKeyPrefixes]]
+   * fast path: picks exactly `updateCounts(partition)` prefixes per partition, without replacement
+   * within this round's draw for that partition (so a round never updates the same key twice), via
+   * a partial Fisher-Yates over index positions -- cheap since it shuffles integers, not strings,
+   * and only touches the first `desired` positions rather than the whole array. Entirely
+   * driver-side: no Spark read, shuffle, or persisted DataFrame is involved.
+   */
+  private def sampleExternalBootstrapUpdateKeysFromPrefixes(
+      prefixes: Array[String],
       updateCounts: Seq[(String, Long)],
       currentRound: Int): DataFrame = {
-    val partitionsToUpdate = updateCounts.map(_._1)
-    println(
-      s"Reading existing keys from external Hudi table '${ext.tablePath}' for round # $currentRound: " +
-        updateCounts.map(t => s"${t._1}=${t._2}").mkString(", "))
+    val available = prefixes.length
+    val keySchema = StructType(
+      Seq(
+        StructField("key", StringType, nullable = false),
+        StructField("partition", StringType, nullable = false)))
+    val rows = updateCounts.flatMap {
+      case (partition, desired) =>
+        val effectiveDesired = Math.min(desired, available.toLong).toInt
+        if (desired > available) {
+          println(
+            s"WARN: Round # $currentRound requests $desired updates for partition '$partition' " +
+              s"but only $available distinct keys exist for the reference partition; updating " +
+              s"all $available")
+        }
+        val indices = Array.range(0, available)
+        val random = new Random(SEED + (currentRound.toLong << 32) + partition.hashCode)
+        // Partial Fisher-Yates: only the first `effectiveDesired` positions need to end up
+        // uniformly random, so only they need to be shuffled.
+        for (i <- 0 until effectiveDesired) {
+          val j = i + random.nextInt(available - i)
+          val tmp = indices(i)
+          indices(i) = indices(j)
+          indices(j) = tmp
+        }
+        indices.take(effectiveDesired).map(idx => Row(s"${prefixes(idx)}_$partition", partition))
+    }
+    spark.createDataFrame(spark.sparkContext.parallelize(rows), keySchema)
+  }
 
-    val sourceDf = spark.read
-      .format("hudi")
-      .load(ext.tablePath)
-      .select(col(ext.partitionPathField).as("partition"), col(ext.recordKeyField).as("key"))
-      .filter(col("partition").isin(partitionsToUpdate: _*))
-    sourceDf.persist()
+  /**
+   * Like [[getExactPerPartitionUpdates]], but samples from the pre-built update-key pool
+   * ([[buildExternalBootstrapUpdateKeyPool]]) instead of reading the external Hudi table: applies
+   * the same stratified-sample-then-trim technique to hit exact per-partition counts. No
+   * `rank()`-by-round de-duplication is needed here (unlike the normal path) since the pool
+   * already holds only the latest version of each key as of when it was built.
+   */
+  private def sampleExternalBootstrapUpdateKeys(
+      updateKeyPool: DataFrame,
+      updateCounts: Seq[(String, Long)],
+      currentRound: Int): DataFrame = {
+    val poolDf = updateKeyPool.filter(col("partition").isin(updateCounts.map(_._1): _*))
 
-    val availableCounts: Map[String, Long] = sourceDf
+    val availableCounts: Map[String, Long] = poolDf
       .groupBy("partition")
       .count()
       .collect()
@@ -789,10 +1047,6 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
 
     val effectiveCounts: Seq[(String, Long, Long)] = updateCounts.map { case (partition, desired) =>
       val available = availableCounts.getOrElse(partition, 0L)
-      require(
-        available > 0,
-        s"Round # $currentRound requests $desired updates for partition '$partition', but no " +
-          s"keys exist for it in external Hudi table '${ext.tablePath}'")
       if (available < desired) {
         println(s"WARN: Round # $currentRound requests $desired updates for partition '$partition' " +
           s"but only $available distinct keys exist in the external table; updating all $available")
@@ -807,19 +1061,25 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
           else Math.min(1.0, (desired * 1.2 + 100.0) / available)
         partition -> fraction
     }.toMap
-    val sampledDF = sourceDf.stat.sampleBy("partition", sampleFractions, SEED + currentRound)
+    val sampledDF = poolDf.stat.sampleBy("partition", sampleFractions, SEED + currentRound)
 
-    val desiredDF = effectiveCounts
-      .map { case (partition, desired, _) => (partition, desired) }
-      .toDF("partition", "desired_updates")
-    val perPartitionWindow = Window.partitionBy("partition").orderBy(rand(SEED + currentRound))
-    val pickedDF = sampledDF
-      .withColumn("rn", row_number().over(perPartitionWindow))
-      .join(broadcast(desiredDF), "partition")
-      .filter($"rn" <= $"desired_updates")
-      .drop("rn", "desired_updates")
+    // sampleBy already randomly selected which rows are in sampledDF, so trimming down to the
+    // exact desired count doesn't need a *second* random draw -- any `desired` rows from this
+    // already-random over-sample are equally unbiased. That means the trim doesn't need a sort at
+    // all: a plain RDD.groupBy + take(desired) (shuffle only) replaces the previous
+    // Window.partitionBy(...).orderBy(rand(...)) + row_number() (shuffle + sort per group), which
+    // was the dominant per-round cost in practice.
+    val desiredByPartition = effectiveCounts.map { case (partition, desired, _) => partition -> desired }.toMap
+    val desiredBroadcast = spark.sparkContext.broadcast(desiredByPartition)
+    val sampledSchema = sampledDF.schema
+    val pickedRDD = sampledDF.rdd
+      .groupBy(row => row.getAs[String]("partition"))
+      .flatMap {
+        case (partition, rows) =>
+          rows.take(desiredBroadcast.value.getOrElse(partition, 0L).toInt)
+      }
+    val pickedDF = spark.createDataFrame(pickedRDD, sampledSchema)
     pickedDF.persist()
-    sourceDf.unpersist()
 
     val pickedCounts: Map[String, Long] = pickedDF
       .groupBy("partition")

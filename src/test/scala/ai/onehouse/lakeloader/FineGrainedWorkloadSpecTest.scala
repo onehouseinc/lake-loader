@@ -215,7 +215,7 @@ class FineGrainedWorkloadSpecTest extends AnyFunSuite {
     assert(spec.totalRounds == 3)
   }
 
-  test("externalBootstrap defaults: payloadPoolMultiplier=2.0, hoodie meta field names") {
+  test("externalBootstrap defaults: payloadPoolMultiplier=2.0, key/partition field names") {
     val spec = parse("""
       |{
       |  "externalBootstrap": {"tablePath": "hdfs://x/table"},
@@ -223,8 +223,8 @@ class FineGrainedWorkloadSpecTest extends AnyFunSuite {
       |}""".stripMargin)
     val ext = spec.externalBootstrap.get
     assert(ext.payloadPoolMultiplier == 2.0)
-    assert(ext.recordKeyField == "_hoodie_record_key")
-    assert(ext.partitionPathField == "_hoodie_partition_path")
+    assert(ext.recordKeyField == "key")
+    assert(ext.partitionPathField == "partition")
     assert(ext.suffixKeyWithPartitionPath == false)
   }
 
