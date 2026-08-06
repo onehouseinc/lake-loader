@@ -158,6 +158,13 @@ object WriteProfiler {
         f"a workload profile that counts both would be dominated by rewrites"
     }
     if (ingestSummary.writeAmplification > 2.0) {
+      notes += "amplification and both bytes/record figures are rates over THIS " +
+        "window, not intrinsic table properties: each rewrite of a file group " +
+        "counts its whole record count again, so a longer window yields a larger " +
+        "figure for the same table. Do not compare runs with different " +
+        "--max-commits / --since-instant."
+    }
+    if (ingestSummary.writeAmplification > 2.0) {
       notes += f"ingest write amplification is ${ingestSummary.writeAmplification}%.2fx: " +
         f"Hudi wrote ${ingestSummary.recordsWritten}%d records to contribute " +
         f"${ingestSummary.inserts + ingestSummary.updates + ingestSummary.deletes}%d. " +
@@ -223,7 +230,11 @@ object WriteProfiler {
     sb.append(s"table type:   ${p.tableType}\n")
     sb.append(
       s"window:       ${p.windowFirstInstant} .. ${p.windowLastInstant} " +
-        s"(${p.totalCommits} completed write commits)\n")
+        s"(${p.totalCommits} completed write commits" +
+        WriteProfileStats
+          .windowSpanHours(p.windowFirstInstant, p.windowLastInstant)
+          .map(h => f", spanning ~$h%.1f h")
+          .getOrElse("") + ")\n")
     sb.append(s"  ingest commits:        ${p.ingestCommits}\n")
     sb.append(s"  table-service commits: ${p.tableServiceCommits}\n")
     sb.append(
@@ -270,7 +281,7 @@ object WriteProfiler {
     sb.append(f"    updates                        ${s.updates}%d\n")
     sb.append(f"    deletes                        ${s.deletes}%d\n")
     sb.append(f"  records actually written         ${s.recordsWritten}%d\n")
-    sb.append(f"  write amplification              ${s.writeAmplification}%.2fx\n")
+    sb.append(f"  write amplification (window)     ${s.writeAmplification}%.2fx\n")
     sb.append(f"  update share of contributed      ${s.updateShareOfNewRecords * 100}%.1f%%\n")
     sb.append(f"  bytes written                    ${s.bytesWritten}%d\n")
     sb.append(f"  bytes/record (written basis)     ${s.bytesPerRecordWritten}%.1f\n")

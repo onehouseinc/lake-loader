@@ -123,6 +123,13 @@ object WriteProfileStats {
       // Fraction of contributed records that were updates. Distinct from
       // amplification, which is about rewritten records.
       updateShareOfNewRecords: Double,
+      // Records written per record contributed, ACROSS THIS WINDOW ONLY. Not an
+      // intrinsic property of the table: each time a file group is rewritten its
+      // whole record count is counted again, so a longer window yields a larger
+      // figure for the same table (measured 7.5x over 60 commits and 28.2x over
+      // 721 commits on the same source). Read it as a cost rate for the window
+      // -- "to land N new records over this span, Hudi wrote M" -- and never
+      // compare values taken over windows of different length.
       writeAmplification: Double,
       bytesPerRecordWritten: Double,
       bytesPerNewRecord: Double,
@@ -168,6 +175,33 @@ object WriteProfileStats {
    */
   def growthObservable(groups: Seq[FileGroupProfile]): List[FileGroupProfile] =
     groups.filter(_.baseFileTouches >= 2).toList
+
+  /**
+   * Wall-clock hours between two Hudi instant strings (`yyyyMMddHHmmssSSS`, or the
+   * older `yyyyMMddHHmmss`). Reported alongside the commit count because most
+   * figures here are rates over the window rather than intrinsic table
+   * properties — a reader needs the span to interpret them. Returns None if
+   * either instant doesn't parse.
+   */
+  def windowSpanHours(firstInstant: String, lastInstant: String): Option[Double] =
+    for {
+      a <- parseInstantMillis(firstInstant)
+      b <- parseInstantMillis(lastInstant)
+    } yield math.max(0.0, (b - a).toDouble / 3600000.0)
+
+  private[utils] def parseInstantMillis(instant: String): Option[Long] = {
+    val digits = instant.takeWhile(_.isDigit)
+    if (digits.length < 14) return None
+    try {
+      val fmt = new java.text.SimpleDateFormat("yyyyMMddHHmmss")
+      fmt.setTimeZone(java.util.TimeZone.getTimeZone("UTC"))
+      val base = fmt.parse(digits.substring(0, 14)).getTime
+      val millis = if (digits.length >= 17) digits.substring(14, 17).toLong else 0L
+      Some(base + millis)
+    } catch {
+      case _: Exception => None
+    }
+  }
 
   /** Percentile of a double sequence using nearest-rank. Empty input returns 0.0. */
   def percentile(xs: Seq[Double], p: Double): Double = {

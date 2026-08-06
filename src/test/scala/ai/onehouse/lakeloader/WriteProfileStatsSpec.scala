@@ -157,6 +157,32 @@ class WriteProfileStatsSpec extends AnyFunSuite with Matchers {
     WriteProfileStats.summarize(1, groups).partitionsTouched shouldBe 2
   }
 
+  test("window span is derived from Hudi instant strings") {
+    // 20260806173529301 .. 20260806213201949 -> ~3.94 h, the real 60-commit window.
+    WriteProfileStats
+      .windowSpanHours("20260806173529301", "20260806213201949")
+      .get shouldBe (3.94 +- 0.02)
+    // Second-precision instants (no millis suffix) parse too.
+    WriteProfileStats.windowSpanHours("20260806120000", "20260806180000").get shouldBe
+      (6.0 +- 1e-9)
+    WriteProfileStats.windowSpanHours("bogus", "20260806180000") shouldBe None
+  }
+
+  test("amplification grows with window length for the same table") {
+    // The reason writeAmplification is documented as a window-scoped rate: a file
+    // group rewritten more times contributes its whole record count each time.
+    def ampOver(rewrites: Int): Double = {
+      val ws = (1 to rewrites).map { i =>
+        w("fg1", f"$i%03d", numWrites = i * 1000L, inserts = 1000L)
+      }
+      WriteProfileStats.summarize(rewrites, WriteProfileStats.profileFileGroups(ws))
+        .writeAmplification
+    }
+    val short = ampOver(5)
+    val long = ampOver(50)
+    long should be > short
+  }
+
   test("percentile uses nearest rank and tolerates empty input") {
     WriteProfileStats.percentile(Nil, 50) shouldBe 0.0
     val xs = Seq(1.0, 2.0, 3.0, 4.0, 5.0)
