@@ -77,6 +77,10 @@ object WriteProfiler {
       totalCommits: Int,
       ingestCommits: Int,
       tableServiceCommits: Int,
+      // Commits that actually carried write stats. An idle pipeline still emits
+      // commits, so this can be a small fraction of totalCommits — in which case
+      // every figure below rests on only those few commits.
+      commitsWithWrites: Int,
       operationTypeCounts: List[(String, Int)],
       ingest: SegmentSummary,
       tableService: SegmentSummary,
@@ -152,6 +156,21 @@ object WriteProfiler {
     if (ingestSummary.recordsWritten == 0L) {
       notes += "no ingest writes in this window — every commit was a table service"
     }
+
+    // An all-or-nothing guard is not enough: a window can pass it on a couple of
+    // non-empty commits out of hundreds and still report confident-looking
+    // figures. Observed on a real table with 642 ingest commits contributing 9
+    // records total.
+    val commitsWithWrites = commits.count(_.fileGroupWrites.exists(_.numWrites > 0L))
+    val writeShare =
+      if (commits.isEmpty) 0.0 else commitsWithWrites.toDouble / commits.size.toDouble
+    if (writeShare < 0.25) {
+      notes += f"ONLY $commitsWithWrites%d of ${commits.size}%d commits " +
+        f"(${writeShare * 100}%.1f%%) carried any write stats — every figure here " +
+        f"rests on those alone, and is unlikely to describe the table's steady " +
+        f"state. The rest are empty batches from an idle pipeline. Treat this run " +
+        f"as unrepresentative and widen the window with --since-instant."
+    }
     if (serviceSummary.recordsWritten > ingestSummary.recordsWritten && serviceCommits.nonEmpty) {
       notes += f"table services wrote more records than ingest did " +
         f"(${serviceSummary.recordsWritten}%d vs ${ingestSummary.recordsWritten}%d) — " +
@@ -197,6 +216,7 @@ object WriteProfiler {
       totalCommits = commits.size,
       ingestCommits = ingestCommits.size,
       tableServiceCommits = serviceCommits.size,
+      commitsWithWrites = commitsWithWrites,
       operationTypeCounts = opCounts,
       ingest = ingestSummary,
       tableService = serviceSummary,
@@ -237,6 +257,7 @@ object WriteProfiler {
           .getOrElse("") + ")\n")
     sb.append(s"  ingest commits:        ${p.ingestCommits}\n")
     sb.append(s"  table-service commits: ${p.tableServiceCommits}\n")
+    sb.append(s"  commits with writes:   ${p.commitsWithWrites} of ${p.totalCommits}\n")
     sb.append(
       s"  operation types:       " +
         p.operationTypeCounts.map { case (op, n) => s"$op=$n" }.mkString(", ") + "\n\n")
@@ -326,6 +347,7 @@ object WriteProfiler {
        |  "totalCommits": ${p.totalCommits},
        |  "ingestCommits": ${p.ingestCommits},
        |  "tableServiceCommits": ${p.tableServiceCommits},
+       |  "commitsWithWrites": ${p.commitsWithWrites},
        |  "operationTypeCounts": {${p.operationTypeCounts
         .map { case (op, n) => s"${q(op)}: $n" }
         .mkString(", ")}},

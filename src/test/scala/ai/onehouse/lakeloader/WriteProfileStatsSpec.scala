@@ -191,6 +191,88 @@ class WriteProfileStatsSpec extends AnyFunSuite with Matchers {
     WriteProfileStats.percentile(xs, 100) shouldBe 5.0
   }
 
+  private def commitAgg(
+      instant: String,
+      op: String,
+      isTableService: Boolean,
+      writes: Seq[WorkloadSynthesizer.FileGroupWrite]): WorkloadSynthesizer.CommitAgg =
+    WorkloadSynthesizer.CommitAgg(
+      instant = instant,
+      action = if (isTableService) "replacecommit" else "deltacommit",
+      inserts = writes.map(_.numInserts).sum,
+      updates = writes.map(_.numUpdates).sum,
+      bytesWritten = writes.map(_.totalWriteBytes).sum,
+      partitionInserts = Map.empty,
+      partitionUpdates = Map.empty,
+      freshFileSizes = Nil,
+      isTableService = isTableService,
+      operationType = op,
+      fileGroupWrites = writes)
+
+  private def fgWrite(
+      fileId: String,
+      instant: String,
+      numWrites: Long,
+      inserts: Long): WorkloadSynthesizer.FileGroupWrite =
+    WorkloadSynthesizer.FileGroupWrite(
+      fileId = fileId,
+      partitionPath = "p1",
+      instant = instant,
+      isTableService = false,
+      created = false,
+      isBaseFile = true,
+      numWrites = numWrites,
+      numInserts = inserts,
+      numUpdates = 0L,
+      numDeletes = 0L,
+      totalWriteBytes = numWrites * 10,
+      fileSizeInBytes = numWrites * 10)
+
+  test("a window where every commit has empty write stats is refused") {
+    val empty = (1 to 5).map(i => commitAgg(f"$i%03d", "UPSERT", isTableService = false, Nil))
+    val ex = intercept[IllegalArgumentException] {
+      WriteProfiler.derive(empty.toList, "MERGE_ON_READ")
+    }
+    ex.getMessage should include("empty write stats")
+  }
+
+  test("a window carrying writes in only a few commits is flagged as unrepresentative") {
+    // A real observed shape: 4 of 645 commits carried write stats.
+    val idle = (1 to 99).map(i => commitAgg(f"$i%03d", "UPSERT", isTableService = false, Nil))
+    val busy = commitAgg("100", "UPSERT", isTableService = false,
+      Seq(fgWrite("fg1", "100", numWrites = 500, inserts = 100)))
+    val p = WriteProfiler.derive((idle :+ busy).toList, "MERGE_ON_READ")
+    p.commitsWithWrites shouldBe 1
+    p.totalCommits shouldBe 100
+    p.notes.exists(_.contains("ONLY 1 of 100 commits")) shouldBe true
+  }
+
+  test("a healthy window is not flagged as unrepresentative") {
+    val commits = (1 to 20).map { i =>
+      commitAgg(f"$i%03d", "UPSERT", isTableService = false,
+        Seq(fgWrite("fg1", f"$i%03d", numWrites = 1000, inserts = 100)))
+    }
+    val p = WriteProfiler.derive(commits.toList, "MERGE_ON_READ")
+    p.commitsWithWrites shouldBe 20
+    p.notes.exists(_.contains("carried any write stats")) shouldBe false
+  }
+
+  test("ingest and table-service commits are summarized as separate populations") {
+    val ingest = commitAgg("001", "UPSERT", isTableService = false,
+      Seq(fgWrite("fg1", "001", numWrites = 1000, inserts = 100)))
+    val cluster = commitAgg("002", "CLUSTER", isTableService = true,
+      Seq(fgWrite("fg2", "002", numWrites = 5000, inserts = 5000)))
+    val p = WriteProfiler.derive(List(ingest, cluster), "MERGE_ON_READ")
+    p.ingestCommits shouldBe 1
+    p.tableServiceCommits shouldBe 1
+    p.ingest.recordsWritten shouldBe 1000L
+    p.tableService.recordsWritten shouldBe 5000L
+    // Clustering rewrites without contributing, so its amplification is 1.00x.
+    p.tableService.writeAmplification shouldBe (1.0 +- 1e-9)
+    p.ingest.writeAmplification shouldBe (10.0 +- 1e-9)
+    p.notes.exists(_.contains("table services wrote more records than ingest")) shouldBe true
+  }
+
   test("table-service classification keys off operationType, compaction flag and action") {
     import WorkloadSynthesizer.isTableServiceCommit
     isTableServiceCommit(
