@@ -2,7 +2,7 @@
 
 Lake loader is a tool to benchmark incremental load (writes) to data lakes and warehouses. The tool generates input datasets with configurations to cover different aspects of load patterns - number of records, number of partitions, record size, update to insert ratio, distribution of inserts & updates across partitions and total number of rounds of incremental loads to perform. 
 
-The tool consists of four main components:
+The tool consists of five main components:
 
 **Change data generator** This component takes a specified L pattern and generates rounds of inputs. Each input round has change records, which can be either an insert or an update to an insert in a prior input round.
 
@@ -11,6 +11,8 @@ The tool consists of four main components:
 **Workload Synthesizer** Points at an existing Hudi table, walks its timeline, and emits a `ChangeDataGenerator` configuration that mimics the observed production workload shape (records per round, update ratio, per-partition insert skew, zipf shape, primary-key type). Lets customers hand off a small config artifact instead of raw data. See [docs/workload-synthesizer.md](docs/workload-synthesizer.md) for motivation and design.
 
 **Workload Resizer** Consumes the machine-readable output of the Synthesizer (`synth-derived.json`) and applies a scale factor and/or a target partition count to produce a benchmark-sized configuration. Preserves the shape of the workload (update ratio, zipf skew, key type, record size) while scaling data volume and partition fanout independently. Runs as a plain JVM CLI — no Spark needed.
+
+**Write Profiler** Describes how an existing Hudi table is actually being written, rolled up per **file group** rather than per partition: how many file groups were created versus rewritten, how many saw inserts/updates/deletes, how much each grew, and how many records Hudi rewrote per record the writer contributed. Reports ingest and table services (clustering/compaction) as separate populations. Read-only with respect to the source table.
 
 ![Figure: Shows the Lake Loader tool's high-level functioning to benchmark incremental loads across popular cloud data platforms.
 ](src/main/resources/images/lakeLoaderArch.png)
@@ -158,6 +160,45 @@ java -cp <jar-file> ai.onehouse.lakeloader.WorkloadResizer [options]
 * `resized-full.flags` — scaled flag string with per-commit record counts scaled by `--scale-factor`.
 * `resized-summary.flags` — scaled flag string with single median records-per-round.
 * `resized-audit.txt` — before/after values for every changed parameter and a list of preserved invariants.
+
+## WriteProfiler Parameters
+
+The WriteProfiler describes how an existing Hudi table is **actually being written**, rolled up per **file group** rather than per partition. It answers a different question from WorkloadSynthesizer: the synthesizer emits a config that reproduces a workload's shape, while the profiler reports what the table did — how many file groups were created versus rewritten, how many saw inserts/updates/deletes, how much each grew, and how many records Hudi rewrote per record the writer contributed.
+
+Two things it does that the synthesizer does not:
+
+1. **Separates table services from ingest.** Clustering and compaction are reported as their own population, keyed off `operationType` (`CLUSTER` / `COMPACT` / `LOG_COMPACT`), the `compacted` flag, and a bare `commit` action on a MoR table. On a clustered table the rewrites routinely dwarf the ingest they accompany, so summing the two produces a workload description dominated by Hudi's own IO.
+2. **Reports write amplification.** `numWrites` on a `HoodieWriteStat` is the record count of the file the write produced; `numInserts + numUpdates + numDeletes` is what the write contributed. When Hudi appends a small batch into an existing base file it rewrites the whole file, so the two differ — often by a large factor. Dividing bytes by the contributed count overstates bytes/record by exactly the amplification factor, so both bases are reported side by side.
+
+Read-only with respect to the source table: it reads the timeline and writes only under `--output-dir` (and refuses to run if `--output-dir` sits inside `--table-path`).
+
+**CLI:**
+```bash
+spark-submit --class ai.onehouse.lakeloader.WriteProfiler <jar-file> \
+  --table-path <hudi-table-location> \
+  --output-dir <local-or-hadoop-fs-path> \
+  [--max-commits <n>] [--since-instant <instant>]
+```
+
+### Parameter Reference
+
+| Parameter        | CLI Flag                   | Type    | Default    | Description                                                                                          |
+|------------------|----------------------------|---------|------------|------------------------------------------------------------------------------------------------------|
+| tablePath        | `-t`, `--table-path`       | String  | *required* | Path to an existing Hudi table to profile                                                            |
+| outputDir        | `-o`, `--output-dir`       | String  | *required* | Directory for `write-profile.txt`, `write-profile.json`, `file-groups.csv`. Must not be inside the table |
+| maxCommits       | `--max-commits`            | Int     | all        | Cap on the number of most-recent completed commits to consider                                       |
+| sinceInstant     | `--since-instant`          | String  | none       | Only consider commits with instant time >= this value                                                |
+| topFileGroups    | `--top-file-groups`        | Int     | 20         | How many of the heaviest file groups to list individually in the report                               |
+| emitFileGroupCsv | `--emit-file-group-csv`    | Boolean | true       | Write one CSV row per file group alongside the summary                                                |
+
+**Outputs**:
+* `write-profile.txt` — human-readable report: per-population summaries (ingest vs table service), file-group growth table, and notes calling out amplification and dominance by table services.
+* `write-profile.json` — the same figures, machine-readable.
+* `file-groups.csv` — one row per ingest file group (`touches`, `createdInWindow`, records at first/last base write, inserts/updates/deletes, `recordsWritten`, `amplification`).
+
+**Note on windows.** Like the synthesizer, this walks only the active timeline. If every commit in the window has empty write stats — common when a pipeline commits empty batches and the real history has been archived — the tool fails with a clear message rather than emitting an all-zeros profile that reads like a real result.
+
+**Note on MoR log appends.** `numWrites` only means "total records in the file group" for base-file writes. For a log append it is the block's own record count, so growth is reported only for file groups with at least two base-file writes; the rest are counted and called out in the report.
 
 ## IncrementalLoader Parameters
 
