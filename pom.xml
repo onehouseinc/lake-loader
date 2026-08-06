@@ -170,6 +170,40 @@
     </resources>
   </build>
 
+  <dependencyManagement>
+    <dependencies>
+      <!-- iceberg-core (provided) transitively pulls jackson-databind 2.18.x, which is
+           incompatible with Spark 3.5's jackson-module-scala 2.15.2 and breaks any test that
+           starts a local SparkContext. Pin to the version Spark 3.5 ships; at spark-submit
+           time the Spark distribution provides this version anyway (all provided scope, so
+           the shaded artifact is unchanged). -->
+      <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-databind</artifactId>
+        <version>2.15.2</version>
+      </dependency>
+      <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-core</artifactId>
+        <version>2.15.2</version>
+      </dependency>
+      <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-annotations</artifactId>
+        <version>2.15.2</version>
+      </dependency>
+      <!-- Transitively pulled in at version 1.12.1 (pinned by Confluent's
+           kafka-schema-registry-parent, via hudi-utilities' kafka-json-schema-provider dep),
+           but that exact version isn't mirrored in our artifactory. Pin to the closest
+           available patch version instead. -->
+      <dependency>
+        <groupId>com.github.everit-org.json-schema</groupId>
+        <artifactId>org.everit.json.schema</artifactId>
+        <version>1.12.2</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
   <dependencies>
     <dependency>
       <groupId>org.scala-lang</groupId>

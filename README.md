@@ -11,6 +11,11 @@ The tool consists of two main components:
 ![Figure: Shows the Lake Loader tool's high-level functioning to benchmark incremental loads across popular cloud data platforms.
 ](src/main/resources/images/lakeLoaderArch.png)
 
+> **Benchmarking a large Hudi table?** Bootstrapping it the straightforward way writes the whole
+> dataset once per benchmark variant, which at hundreds of TB takes days. See
+> [EFFICIENT_BOOTSTRAP.md](EFFICIENT_BOOTSTRAP.md) for a flow that pays the real write cost for a
+> single partition and manufactures the rest at the file level.
+
 
 ### Building
 
@@ -87,9 +92,156 @@ spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator <jar-file> [opti
 | numPartitionsToUpdate | `--num-partitions-to-update`           | Int            | -1         | Number of partitions to update (-1 for all)                     |
 | zipfianShape          | `--zipfian-shape`                      | Double         | 2.93       | Shape parameter for Zipf distribution (higher = more skewed)    |
 | partitionDistribution | `--partition-distribution`             | String         | uniform    | Leading per-partition insert weights, zero-padded up to `--total-partitions`. Each segment must sum to 1.0. Use `;` to give round 0 a different distribution than rounds 1+ (e.g. `;0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1` → round 0 uniform, rounds 1+ concentrated in first 10 partitions). An empty segment = uniform across all partitions for that batch. |
+| workloadSpecPath (`generateFineGrainedWorkload`) | `--workload-spec`      | String         | (none)     | Path to a JSON workload spec for fine-grained, exact per-partition control. See [Fine-Grained Workload Spec](#fine-grained-workload-spec). |
 
 **Notes**:
 * **Record count specification**: `--number-records-per-round` accepts a comma-separated list of record counts (e.g., `22000000,22000` for a large initial load followed by smaller incremental rounds). A single value applies uniformly to all rounds. If fewer values are provided than the number of rounds, the last value is repeated for remaining rounds.
+
+### Fine-Grained Workload Spec
+
+While the parameters above shape workloads statistically (ratios and distributions), the
+`--workload-spec` flag instead **exactly mimics a real table's commit history**: every round
+gets precise per-partition insert/update counts. This is useful for replaying production
+ingestion patterns captured from actual commit metadata.
+
+**Spec file format** (JSON):
+```json
+{
+  "bootstrap": {
+    "startDate": "2026-01-01",
+    "endDate": "2026-03-31",
+    "totalRecords": 100000000
+  },
+  "commits": [
+    {
+      "2026-01-01": {"inserts": 1000, "updates": 500},
+      "2026-01-02": {"inserts": 2000}
+    },
+    {
+      "2026-02-01": {"updates": 5000}
+    }
+  ],
+  "nullifiedPartitions": ["2026-01-15", "2026-01-16"]
+}
+```
+
+**Semantics**:
+* **Round 0 (bootstrap)**: `totalRecords` inserts distributed evenly across one partition per
+  day in `[startDate, endDate]` (both inclusive). Partition values are `yyyy-MM-dd` strings.
+* **Round k (k ≥ 1)**: replays `commits[k-1]`. Each entry maps a partition date to exact
+  insert/update counts — list only the partitions the commit touches. `inserts`/`updates`
+  default to 0 when omitted.
+* **Updates** are sampled uniformly at random from the latest version of the keys already
+  present in that partition (from earlier rounds only). Updates may only target partitions
+  that already have data — a date inside the bootstrap range or one a *prior* commit inserted
+  into. If fewer keys exist than requested, all keys are updated and a warning is logged.
+* **Inserts** may open brand-new partitions outside the bootstrap date range (e.g. new daily
+  partitions arriving over time).
+* Counts are **exact**, not probabilistic — unlike the distribution-based mode.
+* The number of rounds is derived from the spec (`1 + commits.length`, or just `commits.length`
+  under [External Bootstrap Mode](#external-bootstrap-mode)).
+* **Validation is strict and fails at parse time**: malformed dates, negative counts,
+  all-zero entries, unknown/typo'd field names, updates targeting partitions with no prior
+  data, and duplicate partition dates within a commit (repeated JSON keys would otherwise
+  silently collapse to the last occurrence) are all rejected with descriptive errors.
+* With `--skip-if-exists`, a rerun where every round already exists skips generation
+  entirely — including the sample-write record-size estimation for custom Avro schemas.
+* **Optional top-level `nullifiedPartitions`**: an array of `yyyy-MM-dd` partition dates whose
+  generated records have every field nulled out except the identity fields
+  (`key`/`partition`/`round`/`ts`). Useful for replicating a real table's full partition
+  count / RLI-shard footprint without paying the on-disk cost of fully-populated records for
+  cold/historical partitions that never receive real incremental traffic.
+* **Optional `bootstrap.suffixKeyWithPartitionPath`** (default `false`) — append
+  `_<partitionPath>` to round-0 keys, giving `<uuid>-<round:%03d>_<partitionPath>` (the normal
+  `--primary-key-type` key plus a partition suffix). Set this when the bootstrap is a seed
+  partition that will later be fanned out across many partitions by copying its base files and
+  rewriting only the key suffix (see [EFFICIENT_BOOTSTRAP.md](EFFICIENT_BOOTSTRAP.md)): that
+  rewriter splits on the *last* underscore, so a key without one gains a suffix rather than having
+  it replaced. The base key has no underscore of its own, so the split lands on the separator and
+  the whole `<uuid>-<round>` prefix survives the rewrite. Unlike
+  `externalBootstrap.suffixKeyWithPartitionPath` (which mints a bare `<uuid>_<partitionPath>`),
+  the `%03d` round tag is retained — but it is no longer the last 3 characters, so extract it with
+  `regexp_extract(key, "-(\\d{3})_", 1)` rather than `substring(key, -3, 3)`.
+
+### External Bootstrap Mode
+
+By default, round 0 is generated locally by lake-loader itself (the `bootstrap` field above).
+An opt-in alternative, `externalBootstrap`, skips round 0 entirely and instead treats an
+**already-populated Hudi table** as the bootstrap — e.g. a real production snapshot, or a
+single `bulk_insert` shared across multiple benchmark variants (baseline vs. Quanton) so each
+variant doesn't have to regenerate and reload an identical bootstrap dataset.
+
+Exactly one of `bootstrap` or `externalBootstrap` must be present in the spec.
+
+```json
+{
+  "externalBootstrap": {
+    "tablePath": "s3a://bucket/existing-hudi-table",
+    "payloadPoolMultiplier": 2.0,
+    "recordKeyField": "_hoodie_record_key",
+    "partitionPathField": "_hoodie_partition_path",
+    "suffixKeyWithPartitionPath": false
+  },
+  "commits": [
+    {"2026-01-01": {"inserts": 1000, "updates": 500}}
+  ]
+}
+```
+
+**Fields** (all but `tablePath` optional, defaults shown above):
+* `tablePath` (required) — path to the pre-populated Hudi table.
+* `payloadPoolMultiplier` (default `2.0`, must be ≥ `1.0`) — a single pool of payload rows
+  (data columns only, no key/partition/round/ts) is generated once per job, sized to
+  `ceil(payloadPoolMultiplier * maxDemand)` where `maxDemand` is the largest single
+  `(partition, commit)` `inserts + updates` count across the whole spec. Every commit samples
+  its rows from this shared pool (with replacement) instead of regenerating payload data.
+* `recordKeyField` / `partitionPathField` — column names to read back from the external table
+  for update targets; default to Hudi's own meta-field names.
+* `suffixKeyWithPartitionPath` (default `false`) — when `true`, new-insert keys are generated
+  as `<uuid>_<partitionPath>` instead of the normal `--primary-key-type` scheme. This matches a
+  bootstrap built by generating real data for a single partition and copying it verbatim to
+  every other partition, rewriting only the key to stay globally unique. Update keys are
+  unaffected either way — they're always reused verbatim from the external table.
+
+**Semantics**:
+* Round numbering starts at 1 (round 0 is never generated); the number of rounds equals
+  `commits.length`.
+* Update targets for every commit are read back from the **live external table at datagen
+  time** (partition- and column-pruned; works whether or not the table has a Record Level
+  Index) — not from lake-loader's own previously-generated round directories. So a workload
+  spec must only request updates on partitions that were already populated in the external
+  table's original bootstrap snapshot — not on partitions that only gained records from an
+  earlier lake-loader round that hasn't actually been loaded into the external table yet.
+* The "updates can only target partitions with prior data" validation that applies to the
+  `bootstrap` mode is skipped entirely — any partition referenced by a commit's `updates` is
+  assumed to already exist in the external table.
+
+**CLI example**:
+```bash
+spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator <jar-file> \
+  --path s3a://output/workload \
+  --workload-spec s3a://config/workload_spec.json \
+  --record-size 1024
+```
+
+**Scala API example**:
+```scala
+import ai.onehouse.lakeloader.ChangeDataGenerator
+import ai.onehouse.lakeloader.configs.FineGrainedWorkloadSpec
+
+val spec = FineGrainedWorkloadSpec.fromJsonFile(
+  "s3a://config/workload_spec.json",
+  spark.sparkContext.hadoopConfiguration)
+val datagen = new ChangeDataGenerator(spark, spec.totalRounds)
+datagen.generateFineGrainedWorkload("s3a://output/workload", spec)
+```
+
+When `--workload-spec` is set, the flags `--number-rounds`, `--number-records-per-round`,
+`--update-ratio`, `--total-partitions`, `--partition-distribution`, `--update-pattern` and
+`--num-partitions-to-update` are ignored. `--record-size`, `--number-columns`,
+`--avro-schema`, `--datagen-file-size`, `--skip-if-exists`, `--start-round` and
+`--primary-key-type` work the same as in the distribution-based mode (including the
+sample-write record-size estimation for custom Avro schemas).
 
 ## IncrementalLoader Parameters
 
