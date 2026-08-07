@@ -20,6 +20,7 @@ import ai.onehouse.lakeloader.parser.WorkloadSynthesizerParser
 import ai.onehouse.lakeloader.utils.{AvroSchemaUtils, TimelineStats}
 import org.apache.hadoop.fs.{FSDataOutputStream, Path}
 import org.apache.hudi.common.model.{HoodieCommitMetadata, HoodieWriteStat}
+import org.apache.hudi.common.model.HoodieTableType
 import org.apache.hudi.common.table.HoodieTableMetaClient
 import org.apache.hudi.common.table.timeline.{HoodieInstant, HoodieTimeline}
 import org.apache.hudi.storage.hadoop.HadoopStorageConfiguration
@@ -45,6 +46,29 @@ object WorkloadSynthesizer {
   private val UUID_PREFIX = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-".r
   private val EPOCH_PREFIX = "^\\d{10,}".r
 
+  /**
+   * One write into one file group by one commit — the un-aggregated form of a
+   * HoodieWriteStat. WriteProfiler rolls these up by fileId; WorkloadSynthesizer
+   * ignores them and uses the partition-level sums below.
+   */
+  private[lakeloader] case class FileGroupWrite(
+      fileId: String,
+      partitionPath: String,
+      instant: String,
+      isTableService: Boolean,
+      // prevCommit was absent, so this write brought the file group into being.
+      created: Boolean,
+      // True when this stat wrote a base file. Only then does numWrites mean
+      // "total records in the file group"; for a log append it's the block's
+      // own record count, so the two can't be compared.
+      isBaseFile: Boolean,
+      numWrites: Long,
+      numInserts: Long,
+      numUpdates: Long,
+      numDeletes: Long,
+      totalWriteBytes: Long,
+      fileSizeInBytes: Long)
+
   /** Aggregated counts derived from a single commit's HoodieCommitMetadata. */
   private[lakeloader] case class CommitAgg(
       instant: String,
@@ -55,6 +79,12 @@ object WorkloadSynthesizer {
       partitionInserts: Map[String, Long],
       partitionUpdates: Map[String, Long],
       freshFileSizes: Seq[Long],
+      // Hudi's own rewrites (clustering / compaction) rather than user writes.
+      // Kept as a flag rather than filtered out here so callers can report the
+      // two populations separately.
+      isTableService: Boolean = false,
+      operationType: String = "UNKNOWN",
+      fileGroupWrites: Seq[FileGroupWrite] = Seq.empty,
       // Absolute paths of base parquet files this commit wrote. Used by the
       // key-type resolver to sample footer stats from the most recent commits
       // rather than doing a full-table directory walk. Empty for commits that
@@ -150,7 +180,7 @@ object WorkloadSynthesizer {
   // Timeline scanning
   ///////////////////////
 
-  private def loadCommits(
+  private[lakeloader] def loadCommits(
       metaClient: HoodieTableMetaClient,
       config: SynthesizerConfig): List[CommitAgg] = {
     // Only the active timeline is walked. Archived timeline is intentionally
@@ -176,13 +206,14 @@ object WorkloadSynthesizer {
     }
 
     val basePath = metaClient.getBasePath
+    val tableIsMor = metaClient.getTableType == HoodieTableType.MERGE_ON_READ
     bounded.flatMap { instant =>
       val details = metaClient.getActiveTimeline.getInstantDetails(instant)
       if (!details.isPresent) None
       else {
         val bytes = details.get()
         val metadata = deserializeCommitMetadata(serde, instant, bytes)
-        Some(aggregateCommit(instant, metadata, basePath))
+        Some(aggregateCommit(instant, metadata, basePath, tableIsMor))
       }
     }
   }
@@ -207,10 +238,37 @@ object WorkloadSynthesizer {
     }
   }
 
+  /**
+   * True when a commit is Hudi reorganizing existing data rather than the user
+   * writing new data. `operationType` is the primary signal (CLUSTER / COMPACT /
+   * LOG_COMPACT); the `compacted` flag and a bare `commit` action on a MoR table
+   * are fallbacks for writers that leave operationType UNKNOWN.
+   *
+   * Counting these as workload badly distorts a profile: on a clustered table the
+   * rewrites can be orders of magnitude larger than the ingest they accompany.
+   */
+  private[lakeloader] def isTableServiceCommit(
+      operationType: String,
+      action: String,
+      compacted: Boolean,
+      tableIsMor: Boolean): Boolean = {
+    val opSaysService = Set("CLUSTER", "COMPACT", "LOG_COMPACT").contains(operationType)
+    // On MoR, ingest lands in deltacommits; a plain `commit` is compaction output.
+    val actionSaysService = tableIsMor && action == HoodieTimeline.COMMIT_ACTION
+    opSaysService || compacted || actionSaysService
+  }
+
   private def aggregateCommit(
       instant: HoodieInstant,
       metadata: HoodieCommitMetadata,
-      basePath: org.apache.hudi.storage.StoragePath): CommitAgg = {
+      basePath: org.apache.hudi.storage.StoragePath,
+      tableIsMor: Boolean): CommitAgg = {
+    val operationType =
+      Option(metadata.getOperationType).map(_.toString).getOrElse("UNKNOWN")
+    val compacted = Option(metadata.getCompacted).exists(_.booleanValue())
+    val tableService =
+      isTableServiceCommit(operationType, instant.getAction, compacted, tableIsMor)
+    val fgWrites = scala.collection.mutable.ArrayBuffer[FileGroupWrite]()
     var inserts = 0L
     var updates = 0L
     var bytesWritten = 0L
@@ -236,8 +294,25 @@ object WorkloadSynthesizer {
         // Capture the full base-parquet path written by this stat. Skip log
         // files (MoR delta commits) — key-type inference only reads parquet.
         val rel = s.getPath
-        if (rel != null && rel.endsWith(".parquet")) {
+        val isBaseFile = rel != null && rel.endsWith(".parquet")
+        if (isBaseFile) {
           parquetPaths += new org.apache.hudi.storage.StoragePath(basePath, rel).toString
+        }
+
+        if (s.getFileId != null && s.getFileId.nonEmpty) {
+          fgWrites += FileGroupWrite(
+            fileId = s.getFileId,
+            partitionPath = partition,
+            instant = instant.requestedTime,
+            isTableService = tableService,
+            created = prev == null || prev == "null",
+            isBaseFile = isBaseFile,
+            numWrites = math.max(s.getNumWrites, 0L),
+            numInserts = ni,
+            numUpdates = nu,
+            numDeletes = math.max(s.getNumDeletes, 0L),
+            totalWriteBytes = math.max(s.getTotalWriteBytes, 0L),
+            fileSizeInBytes = math.max(s.getFileSizeInBytes, 0L))
         }
       }
     }
@@ -251,6 +326,9 @@ object WorkloadSynthesizer {
       partitionInserts = partitionInserts.toMap,
       partitionUpdates = partitionUpdates.toMap,
       freshFileSizes = freshFileSizes.toSeq,
+      isTableService = tableService,
+      operationType = operationType,
+      fileGroupWrites = fgWrites.toSeq,
       writtenParquetPaths = parquetPaths.toSeq)
   }
 
@@ -387,6 +465,7 @@ object WorkloadSynthesizer {
 
   private val RLI_METADATA_PARTITION = "record_index"
   private val RLI_FILE_ID_PREFIX = "record-index-"
+  private val HOODIE_PARTITION_METADATA = ".hoodie_partition_metadata"
   // Global RLI file-IDs: full ID is `record-index-<0000>-<0>`. After stripping
   // the "record-index-" prefix, what's left matches `\d{4,}-\d+`.
   private val RLI_GLOBAL_SUFFIX = "^\\d{4,}-\\d+$".r
@@ -434,9 +513,13 @@ object WorkloadSynthesizer {
         storage.listDirectEntries(rliDir).asScala
           .filter(e => e.isFile)
           .map(_.getPath.getName)
-          .filter(name => !name.startsWith(".") && !name.startsWith("_"))
-          // Hudi base file names: <fileId>_<writeToken>_<instantTime>.<ext>
-          .map(name => name.split("_").headOption.getOrElse(""))
+          .filterNot(_ == HOODIE_PARTITION_METADATA)
+          // Base files:  <fileId>_<writeToken>_<instantTime>.<ext>
+          // Log files:  .<fileId>_<baseInstant>.log.<version>_<writeToken>
+          // An MDT that hasn't been compacted yet has only log files, so strip a
+          // leading '.' rather than skipping dot-files — otherwise RLI on any
+          // actively-ingesting table reads as "unknown".
+          .map(name => (if (name.startsWith(".")) name.drop(1) else name).split("_").headOption.getOrElse(""))
           .filter(_.startsWith(RLI_FILE_ID_PREFIX))
           .toList.distinct
       } catch {
@@ -751,8 +834,12 @@ object WorkloadSynthesizer {
           if (col.getPath.toDotString == keyCol || col.getPath.toArray.lastOption.contains(keyCol)) {
             val stats = col.getStatistics
             if (stats != null && !stats.isEmpty && stats.hasNonNullValue) {
-              val mn = Option(stats.genericGetMin).map(_.toString)
-              val mx = Option(stats.genericGetMax).map(_.toString)
+              // minAsString/maxAsString, not genericGetMin.toString: for a
+              // BYTE_ARRAY key column the generic getter returns a Binary whose
+              // toString is a byte dump ("Binary{36 reused bytes, [50, 50, ...]}"),
+              // which defeats every downstream classification signal.
+              val mn = Option(stats.minAsString)
+              val mx = Option(stats.maxAsString)
               overallMin = combineMin(overallMin, mn)
               overallMax = combineMax(overallMax, mx)
             }
