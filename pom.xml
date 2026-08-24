@@ -170,6 +170,40 @@
     </resources>
   </build>
 
+  <dependencyManagement>
+    <dependencies>
+      <!-- iceberg-core (provided) transitively pulls jackson-databind 2.18.x, which is
+           incompatible with Spark 3.5's jackson-module-scala 2.15.2 and breaks any test that
+           starts a local SparkContext. Pin to the version Spark 3.5 ships; at spark-submit
+           time the Spark distribution provides this version anyway (all provided scope, so
+           the shaded artifact is unchanged). -->
+      <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-databind</artifactId>
+        <version>2.15.2</version>
+      </dependency>
+      <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-core</artifactId>
+        <version>2.15.2</version>
+      </dependency>
+      <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-annotations</artifactId>
+        <version>2.15.2</version>
+      </dependency>
+      <!-- Transitively pulled in at version 1.12.1 (pinned by Confluent's
+           kafka-schema-registry-parent, via hudi-utilities' kafka-json-schema-provider dep),
+           but that exact version isn't mirrored in our artifactory. Pin to the closest
+           available patch version instead. -->
+      <dependency>
+        <groupId>com.github.everit-org.json-schema</groupId>
+        <artifactId>org.everit.json.schema</artifactId>
+        <version>1.12.2</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
   <dependencies>
     <dependency>
       <groupId>org.scala-lang</groupId>
@@ -238,6 +272,27 @@
       <artifactId>scalatest_${scala.libversion}</artifactId>
       <version>${scalatest.version}</version>
       <scope>test</scope>
+    </dependency>
+    <!-- Pin Jackson to the version Spark 3.5.3 expects. Spark's scala module enforces
+         >=2.15.0 && <2.16.0 on databind; Iceberg 1.9.0 (provided) pulls 2.18.3, which
+         explodes under mvn test but is fine at spark-submit runtime where Spark's own
+         classpath wins. Scope is 'provided' (not 'test') because FineGrainedWorkloadSpec
+         uses Jackson in src/main; at spark-submit time Spark supplies these jars, so the
+         shaded artifact is unchanged. Versions come from dependencyManagement above. -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-core</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-annotations</artifactId>
+      <scope>provided</scope>
     </dependency>
   </dependencies>
 

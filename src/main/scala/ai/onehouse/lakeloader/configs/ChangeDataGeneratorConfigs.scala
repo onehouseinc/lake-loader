@@ -23,17 +23,18 @@ case class DatagenConfig(
     roundsDistribution: List[Long] = List(1000000L),
     numberColumns: Int = 10,
     recordSize: Int = 1024,
-    updateRatio: Double = 0.5f,
+    updateRatios: List[Double] = List(0.5),
     totalPartitions: Int = -1,
     targetDataFileSize: Int = 128 * 1024 * 1024,
     skipIfExists: Boolean = false,
     startRound: Int = 0,
     keyType: KeyType = KeyTypes.Random,
-    updatePattern: UpdatePatterns = UpdatePatterns.Uniform,
-    numPartitionsToUpdate: Int = -1,
-    zipfianShape: Double = 2.93,
+    updatePatterns: List[UpdatePatterns] = List(UpdatePatterns.Uniform),
+    numPartitionsToUpdate: List[Int] = List(-1),
+    zipfianShapes: List[Double] = List(2.93),
     avroSchemaPath: Option[String] = None,
-    partitionDistribution: Option[PartitionDistributionSpec] = None)
+    partitionDistribution: Option[PartitionDistributionSpec] = None,
+    workloadSpecPath: Option[String] = None)
 
 /**
  * Per-round split for the CLI partition distribution flag.
