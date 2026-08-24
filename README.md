@@ -2,14 +2,23 @@
 
 Lake loader is a tool to benchmark incremental load (writes) to data lakes and warehouses. The tool generates input datasets with configurations to cover different aspects of load patterns - number of records, number of partitions, record size, update to insert ratio, distribution of inserts & updates across partitions and total number of rounds of incremental loads to perform. 
 
-The tool consists of two main components:
+The tool consists of four main components:
 
 **Change data generator** This component takes a specified L pattern and generates rounds of inputs. Each input round has change records, which can be either an insert or an update to an insert in a prior input round.
 
 **Incremental Loader** The loader component implements best practices for loading data into various open table formats using popular cloud data platforms like AWS EMR, Databricks and Snowflake. Round 0 is specially designed to perform a one-time bulk load using the preferred bulk loading methods for the data platform. Round 1 and above simply perform incremental loads using pre-generated input change records from each round.
 
+**Workload Synthesizer** Points at an existing Hudi table, walks its timeline, and emits a `ChangeDataGenerator` configuration that mimics the observed production workload shape (records per round, update ratio, per-partition insert skew, zipf shape, primary-key type). Lets customers hand off a small config artifact instead of raw data. See [docs/workload-synthesizer.md](docs/workload-synthesizer.md) for motivation and design.
+
+**Workload Resizer** Consumes the machine-readable output of the Synthesizer (`synth-derived.json`) and applies a scale factor and/or a target partition count to produce a benchmark-sized configuration. Preserves the shape of the workload (update ratio, zipf skew, key type, record size) while scaling data volume and partition fanout independently. Runs as a plain JVM CLI — no Spark needed.
+
 ![Figure: Shows the Lake Loader tool's high-level functioning to benchmark incremental loads across popular cloud data platforms.
 ](src/main/resources/images/lakeLoaderArch.png)
+
+> **Benchmarking a large Hudi table?** Bootstrapping it the straightforward way writes the whole
+> dataset once per benchmark variant, which at hundreds of TB takes days. See
+> [EFFICIENT_BOOTSTRAP.md](EFFICIENT_BOOTSTRAP.md) for a flow that pays the real write cost for a
+> single partition and manufactures the rest at the file level.
 
 
 ### Building
@@ -50,16 +59,16 @@ def generateWorkload(
   roundsDistribution: List[Long],
   numColumns: Int = 10,
   recordSize: Int = 1024,
-  updateRatio: Float = 0.5f,
+  updateRatios: List[Double] = List(0.5),
   totalPartitions: Int = -1,
   partitionDistributionMatrixOpt: Option[List[List[Double]]] = None,
   datagenFileSize: Int = 128 * 1024 * 1024,
   skipIfExists: Boolean = false,
   startRound: Int = 0,
   primaryKeyType: KeyType = KeyType.Random,
-  updatePatterns: UpdatePatterns = UpdatePatterns.Uniform,
-  numPartitionsToUpdate: Int = -1,
-  zipfianShape: Double = 2.93
+  updatePatterns: List[UpdatePatterns] = List(UpdatePatterns.Uniform),
+  numPartitionsToUpdate: List[Int] = List(-1),
+  zipfianShapes: List[Double] = List(2.93)
 )
 ```
 
@@ -77,19 +86,231 @@ spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator <jar-file> [opti
 | roundsDistribution    | `--number-records-per-round`           | List[Long]     | 1000000    | Comma-separated record counts per round. A single value applies to all rounds; if fewer values than rounds, the last value is repeated. |
 | numColumns            | `--number-columns`                     | Int            | 10         | Number of columns in schema of generated data (min: 5)          |
 | recordSize            | `--record-size`                        | Int            | 1024       | Record size of generated data in bytes                          |
-| updateRatio           | `--update-ratio`                       | Double         | 0.5        | Ratio of updates to total records (0.0-1.0)                     |
+| updateRatios          | `--update-ratio`                       | List[Double]   | 0.5        | Ratio of updates to total records (0.0-1.0). Single value applies to all rounds; comma-separated list applies per-round with last-value fill. |
 | totalPartitions       | `--total-partitions`                   | Int            | -1         | Total number of partitions (-1 for unpartitioned)               |
 | datagenFileSize       | `--datagen-file-size`                  | Int            | 134217728  | Target data file size in bytes (default: 128MB)                 |
 | skipIfExists          | `--skip-if-exists`                     | Boolean        | false      | Skip generation if folder already exists                        |
 | startRound            | `--start-round`                        | Int            | 0          | Starting round number (for resuming generation)                 |
 | primaryKeyType        | `--primary-key-type`                   | KeyType        | Random     | Key generation type: `Random`, `TemporallyOrdered`              |
-| updatePatterns        | `--update-pattern`                     | UpdatePatterns | Uniform    | Update distribution: `Uniform`, `Zipf`                          |
-| numPartitionsToUpdate | `--num-partitions-to-update`           | Int            | -1         | Number of partitions to update (-1 for all)                     |
-| zipfianShape          | `--zipfian-shape`                      | Double         | 2.93       | Shape parameter for Zipf distribution (higher = more skewed)    |
+| updatePatterns        | `--update-pattern`                     | List[UpdatePatterns] | Uniform | Update distribution: `Uniform`, `Zipf`. Single value applies to all rounds; comma-separated list applies per-round with last-value fill. |
+| numPartitionsToUpdate | `--num-partitions-to-update`           | List[Int]      | -1         | Number of partitions to update (-1 for all). Single value applies to all rounds; comma-separated list applies per-round with last-value fill. |
+| zipfianShapes         | `--zipfian-shape`                      | List[Double]   | 2.93       | Shape parameter for Zipf distribution (higher = more skewed). Single value applies to all rounds; comma-separated list applies per-round with last-value fill. |
 | partitionDistribution | `--partition-distribution`             | String         | uniform    | Leading per-partition insert weights, zero-padded up to `--total-partitions`. Each segment must sum to 1.0. Use `;` to give round 0 a different distribution than rounds 1+ (e.g. `;0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1` → round 0 uniform, rounds 1+ concentrated in first 10 partitions). An empty segment = uniform across all partitions for that batch. |
+| workloadSpecPath (`generateFineGrainedWorkload`) | `--workload-spec`      | String         | (none)     | Path to a JSON workload spec for fine-grained, exact per-partition control. See [Fine-Grained Workload Spec](#fine-grained-workload-spec). |
 
 **Notes**:
 * **Record count specification**: `--number-records-per-round` accepts a comma-separated list of record counts (e.g., `22000000,22000` for a large initial load followed by smaller incremental rounds). A single value applies uniformly to all rounds. If fewer values are provided than the number of rounds, the last value is repeated for remaining rounds.
+* **Per-round variation**: The same list semantics apply to `--update-ratio`, `--update-pattern`, `--num-partitions-to-update`, and `--zipfian-shape`. This is useful when a workload has diurnal or bursty characteristics — for example, `--update-ratio 0.05,0.05,0.05,0.05,0.05,0.05,0.4,0.4,0.4,0.4,0.4,0.4` models 6 overnight rounds at 5% updates followed by 6 business-hours rounds at 40%. If fewer values than rounds are supplied, the last value is repeated. If more values than rounds are supplied, the tail is truncated.
+
+## WorkloadSynthesizer Parameters
+
+The WorkloadSynthesizer component analyzes an existing Hudi table and emits `ChangeDataGenerator` flag files that reproduce the observed workload shape. Full motivation and derivation details are in [docs/workload-synthesizer.md](docs/workload-synthesizer.md).
+
+**CLI:**
+```bash
+spark-submit --class ai.onehouse.lakeloader.WorkloadSynthesizer <jar-file> [options]
+```
+
+### Parameter Reference
+
+| Parameter                | CLI Flag                    | Type    | Default    | Description                                                                                             |
+|--------------------------|-----------------------------|---------|------------|---------------------------------------------------------------------------------------------------------|
+| tablePath                | `-t`, `--table-path`        | String  | *required* | Path to an existing Hudi table to characterize                                                          |
+| outputDir                | `-o`, `--output-dir`        | String  | *required* | Directory where `synth-full.flags`, `synth-summary.flags`, and `synth-audit.txt` will be written        |
+| maxCommits               | `--max-commits`             | Int     | all        | Cap on the number of most-recent completed commits considered                                           |
+| sinceInstant             | `--since-instant`           | String  | none       | Only consider commits with instant time >= this value (Hudi instant string, e.g. `20250101120000`)      |
+| minZipfShapeToEmit       | `--min-zipf-shape`          | Double  | 0.3        | Minimum fitted zipf shape below which the tool emits `Uniform` instead of `Zipf`                        |
+| keySampleCommits         | `--key-sample-commits`      | Int     | 3          | Number of most-recent completed commits whose written parquet files are used as the key-type sample source. Deterministic and cheap; no full-table directory walk. |
+| keySampleFiles           | `--key-sample-files`        | Int     | 100        | Cap on the total number of base parquet files sampled across `--key-sample-commits`.                    |
+| keySampleSize            | `--key-sample-size`         | Int     | 500        | Fallback: number of record-key values read from one parquet file when fewer than 3 footer samples are available. |
+| primaryKeyTypeOverride   | `--primary-key-type`        | KeyType | inferred   | Skip inference and use this value instead (`Random` \| `TemporallyOrdered`)                             |
+| schemaFile               | `--schema-file`             | String  | none       | Path to a customer-supplied `.avsc`. If set, emit `--avro-schema` and drop `--number-columns`. If unset, tool reads the source Hudi table's schema and emits `--number-columns` matching its top-level field count. |
+| anonymizeSchema          | `--anonymize-schema`        | Boolean | false      | Rewrite field names to typed placeholders (`col_long_a`, `col_string_b`, ...) before writing `schema.avsc` into the output dir. Preserves data types and nullability. Works with both supplied and inferred schemas. |
+
+**Outputs**:
+* `synth-full.flags` — per-commit fidelity: one `--number-records-per-round` entry per source commit, preserving temporal variation.
+* `synth-summary.flags` — median records-per-round collapsed into a single value, for quick sanity runs.
+* `synth-audit.txt` — raw derived numbers, fitted zipf shapes per commit, and key-classification reasoning for review.
+* `schema.avsc` — only when `--anonymize-schema true` (or when `--schema-file` is set and anonymization is on). The emitted flag files reference this path via `--avro-schema`.
+
+The customer only needs to fill in `--path` (benchmark output location) in the emitted flag file before feeding it back into `ChangeDataGenerator`. Schema is either shipped alongside (as `schema.avsc`) or implied via `--number-columns`.
+
+The synthesizer also detects the source table's Record-Level Index (RLI) mode by inspecting file-IDs in the `record_index` metadata partition, and emits `rliMode` (`"none"` | `"global"` | `"partitioned"` | `"unknown"`) in `synth-derived.json` and `synth-audit.txt`. The benchmarking side reads this to configure the target Hudi table's RLI mode to match; the value is not emitted as a `ChangeDataGenerator` flag since the generator doesn't write to a Hudi index directly.
+
+## WorkloadResizer Parameters
+
+The WorkloadResizer consumes `synth-derived.json` (emitted by WorkloadSynthesizer) and applies a scale factor and/or a target partition count to produce a benchmark-sized configuration. Preserves `updateRatio`, `updatePattern`, `zipfianShape`, key type, record size, and file size; scales record volume and partition count independently.
+
+**CLI:**
+```bash
+spark-submit --class ai.onehouse.lakeloader.WorkloadResizer <jar-file> [options]
+```
+
+Or plain JVM (no Spark needed — the Resizer runs on JSON, not Hudi data):
+
+```bash
+java -cp <jar-file> ai.onehouse.lakeloader.WorkloadResizer [options]
+```
+
+### Parameter Reference
+
+| Parameter          | CLI Flag                    | Type    | Default          | Description                                                                                                                                              |
+|--------------------|-----------------------------|---------|------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| inputJson          | `-i`, `--input-json`        | String  | *required*       | Path to a `synth-derived.json` emitted by WorkloadSynthesizer                                                                                            |
+| outputDir          | `-o`, `--output-dir`        | String  | *required*       | Directory for `resized-full.flags`, `resized-summary.flags`, `resized-audit.txt`                                                                         |
+| scaleFactor        | `--scale-factor`            | Double  | 1.0              | Multiplier on per-round record counts. e.g. `0.01` → one-hundredth the volume. `numRounds` unchanged                                                     |
+| targetPartitions   | `--target-partitions`       | Int     | preserved        | New total partition count. Truncates + re-normalizes if smaller than source; extrapolates fitted zipf shape if larger. Rescales `numPartitionsToUpdate` |
+
+**Outputs**:
+* `resized-full.flags` — scaled flag string with per-commit record counts scaled by `--scale-factor`.
+* `resized-summary.flags` — scaled flag string with single median records-per-round.
+* `resized-audit.txt` — before/after values for every changed parameter and a list of preserved invariants.
+
+### Fine-Grained Workload Spec
+
+While the parameters above shape workloads statistically (ratios and distributions), the
+`--workload-spec` flag instead **exactly mimics a real table's commit history**: every round
+gets precise per-partition insert/update counts. This is useful for replaying production
+ingestion patterns captured from actual commit metadata.
+
+**Spec file format** (JSON):
+```json
+{
+  "bootstrap": {
+    "startDate": "2026-01-01",
+    "endDate": "2026-03-31",
+    "totalRecords": 100000000
+  },
+  "commits": [
+    {
+      "2026-01-01": {"inserts": 1000, "updates": 500},
+      "2026-01-02": {"inserts": 2000}
+    },
+    {
+      "2026-02-01": {"updates": 5000}
+    }
+  ],
+  "nullifiedPartitions": ["2026-01-15", "2026-01-16"]
+}
+```
+
+**Semantics**:
+* **Round 0 (bootstrap)**: `totalRecords` inserts distributed evenly across one partition per
+  day in `[startDate, endDate]` (both inclusive). Partition values are `yyyy-MM-dd` strings.
+* **Round k (k ≥ 1)**: replays `commits[k-1]`. Each entry maps a partition date to exact
+  insert/update counts — list only the partitions the commit touches. `inserts`/`updates`
+  default to 0 when omitted.
+* **Updates** are sampled uniformly at random from the latest version of the keys already
+  present in that partition (from earlier rounds only). Updates may only target partitions
+  that already have data — a date inside the bootstrap range or one a *prior* commit inserted
+  into. If fewer keys exist than requested, all keys are updated and a warning is logged.
+* **Inserts** may open brand-new partitions outside the bootstrap date range (e.g. new daily
+  partitions arriving over time).
+* Counts are **exact**, not probabilistic — unlike the distribution-based mode.
+* The number of rounds is derived from the spec (`1 + commits.length`, or just `commits.length`
+  under [External Bootstrap Mode](#external-bootstrap-mode)).
+* **Validation is strict and fails at parse time**: malformed dates, negative counts,
+  all-zero entries, unknown/typo'd field names, updates targeting partitions with no prior
+  data, and duplicate partition dates within a commit (repeated JSON keys would otherwise
+  silently collapse to the last occurrence) are all rejected with descriptive errors.
+* With `--skip-if-exists`, a rerun where every round already exists skips generation
+  entirely — including the sample-write record-size estimation for custom Avro schemas.
+* **Optional top-level `nullifiedPartitions`**: an array of `yyyy-MM-dd` partition dates whose
+  generated records have every field nulled out except the identity fields
+  (`key`/`partition`/`round`/`ts`). Useful for replicating a real table's full partition
+  count / RLI-shard footprint without paying the on-disk cost of fully-populated records for
+  cold/historical partitions that never receive real incremental traffic.
+* **Optional `bootstrap.suffixKeyWithPartitionPath`** (default `false`) — append
+  `_<partitionPath>` to round-0 keys, giving `<uuid>-<round:%03d>_<partitionPath>` (the normal
+  `--primary-key-type` key plus a partition suffix). Set this when the bootstrap is a seed
+  partition that will later be fanned out across many partitions by copying its base files and
+  rewriting only the key suffix (see [EFFICIENT_BOOTSTRAP.md](EFFICIENT_BOOTSTRAP.md)): that
+  rewriter splits on the *last* underscore, so a key without one gains a suffix rather than having
+  it replaced. The base key has no underscore of its own, so the split lands on the separator and
+  the whole `<uuid>-<round>` prefix survives the rewrite. Unlike
+  `externalBootstrap.suffixKeyWithPartitionPath` (which mints a bare `<uuid>_<partitionPath>`),
+  the `%03d` round tag is retained — but it is no longer the last 3 characters, so extract it with
+  `regexp_extract(key, "-(\\d{3})_", 1)` rather than `substring(key, -3, 3)`.
+
+### External Bootstrap Mode
+
+By default, round 0 is generated locally by lake-loader itself (the `bootstrap` field above).
+An opt-in alternative, `externalBootstrap`, skips round 0 entirely and instead treats an
+**already-populated Hudi table** as the bootstrap — e.g. a real production snapshot, or a
+single `bulk_insert` shared across multiple benchmark variants (baseline vs. Quanton) so each
+variant doesn't have to regenerate and reload an identical bootstrap dataset.
+
+Exactly one of `bootstrap` or `externalBootstrap` must be present in the spec.
+
+```json
+{
+  "externalBootstrap": {
+    "tablePath": "s3a://bucket/existing-hudi-table",
+    "payloadPoolMultiplier": 2.0,
+    "recordKeyField": "_hoodie_record_key",
+    "partitionPathField": "_hoodie_partition_path",
+    "suffixKeyWithPartitionPath": false
+  },
+  "commits": [
+    {"2026-01-01": {"inserts": 1000, "updates": 500}}
+  ]
+}
+```
+
+**Fields** (all but `tablePath` optional, defaults shown above):
+* `tablePath` (required) — path to the pre-populated Hudi table.
+* `payloadPoolMultiplier` (default `2.0`, must be ≥ `1.0`) — a single pool of payload rows
+  (data columns only, no key/partition/round/ts) is generated once per job, sized to
+  `ceil(payloadPoolMultiplier * maxDemand)` where `maxDemand` is the largest single
+  `(partition, commit)` `inserts + updates` count across the whole spec. Every commit samples
+  its rows from this shared pool (with replacement) instead of regenerating payload data.
+* `recordKeyField` / `partitionPathField` — column names to read back from the external table
+  for update targets; default to Hudi's own meta-field names.
+* `suffixKeyWithPartitionPath` (default `false`) — when `true`, new-insert keys are generated
+  as `<uuid>_<partitionPath>` instead of the normal `--primary-key-type` scheme. This matches a
+  bootstrap built by generating real data for a single partition and copying it verbatim to
+  every other partition, rewriting only the key to stay globally unique. Update keys are
+  unaffected either way — they're always reused verbatim from the external table.
+
+**Semantics**:
+* Round numbering starts at 1 (round 0 is never generated); the number of rounds equals
+  `commits.length`.
+* Update targets for every commit are read back from the **live external table at datagen
+  time** (partition- and column-pruned; works whether or not the table has a Record Level
+  Index) — not from lake-loader's own previously-generated round directories. So a workload
+  spec must only request updates on partitions that were already populated in the external
+  table's original bootstrap snapshot — not on partitions that only gained records from an
+  earlier lake-loader round that hasn't actually been loaded into the external table yet.
+* The "updates can only target partitions with prior data" validation that applies to the
+  `bootstrap` mode is skipped entirely — any partition referenced by a commit's `updates` is
+  assumed to already exist in the external table.
+
+**CLI example**:
+```bash
+spark-submit --class ai.onehouse.lakeloader.ChangeDataGenerator <jar-file> \
+  --path s3a://output/workload \
+  --workload-spec s3a://config/workload_spec.json \
+  --record-size 1024
+```
+
+**Scala API example**:
+```scala
+import ai.onehouse.lakeloader.ChangeDataGenerator
+import ai.onehouse.lakeloader.configs.FineGrainedWorkloadSpec
+
+val spec = FineGrainedWorkloadSpec.fromJsonFile(
+  "s3a://config/workload_spec.json",
+  spark.sparkContext.hadoopConfiguration)
+val datagen = new ChangeDataGenerator(spark, spec.totalRounds)
+datagen.generateFineGrainedWorkload("s3a://output/workload", spec)
+```
+
+When `--workload-spec` is set, the flags `--number-rounds`, `--number-records-per-round`,
+`--update-ratio`, `--total-partitions`, `--partition-distribution`, `--update-pattern` and
+`--num-partitions-to-update` are ignored. `--record-size`, `--number-columns`,
+`--avro-schema`, `--datagen-file-size`, `--skip-if-exists`, `--start-round` and
+`--primary-key-type` work the same as in the distribution-based mode (including the
+sample-write record-size estimation for custom Avro schemas).
 
 ## IncrementalLoader Parameters
 
