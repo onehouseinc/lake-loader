@@ -19,7 +19,7 @@ import org.apache.spark.sql.catalyst.plans.logical.{GlobalLimit, LocalLimit, Log
 
 object CatalystUtil {
   def partitionLocalLimit(df: DataFrame, n: Int): DataFrame = {
-    val originalPlan = df.logicalPlan
+    val originalPlan = DatasetShim.logicalPlan(df)
     originalPlan match {
       // NOTE: `Dataset.limit` operator is being translated by Spark into:
       //
@@ -40,7 +40,7 @@ object CatalystUtil {
       case Repartition(numPartitions, _, _) =>
         val perPartitionLimit = math.ceil(n / numPartitions).toInt
         val partitionLocalLimitPlan = LocalLimit(Literal(perPartitionLimit), originalPlan)
-        Dataset.ofRows(df.sparkSession, partitionLocalLimitPlan)
+        DatasetShim.ofRows(df.sparkSession, partitionLocalLimitPlan)
 
       case _ => df.limit(n)
     }

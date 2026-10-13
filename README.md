@@ -18,13 +18,18 @@ Lake loader is built with Java 11 or 17 using Maven.
 
 Run `mvn clean package` to build.
 
+To build against Spark 4.1 (Scala 2.13, Java 17 required), run `mvn clean package -Pspark4.1`. This profile
+depends on Hudi 1.3.0-SNAPSHOT, which must be installed in the local Maven repository from a Hudi checkout
+(`mvn clean install -DskipTests -Pspark4.1 -pl packaging/hudi-spark-bundle -am`) until 1.3.0 is released.
+
 ### Formatting
 
 Run `mvn scalafmt:format` to apply scala formatting.
 
 ### Engine Compatibility
 
-Lake loader requires spark to generate and load the dataset, compatible with spark3.x including spark3.5
+Lake loader requires spark to generate and load the dataset, compatible with spark3.x including spark3.5.
+With the `spark4.1` profile it runs on Spark 4.1.
 
 ## Component Overview
 

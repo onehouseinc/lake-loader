@@ -113,7 +113,7 @@ object AvroSchemaUtils {
       val fields = schema.getFields.asScala.map { field =>
         StructField(field.name(), avroToSparkType(field.schema()), nullable = isNullable(field.schema()))
       }
-      StructType(fields)
+      StructType(fields.toSeq)
 
     case ARRAY =>
       ArrayType(

@@ -40,8 +40,10 @@
     <maven-jar-plugin.version>2.6</maven-jar-plugin.version>
     <maven-surefire-plugin.version>2.19.1</maven-surefire-plugin.version>
     <maven-shade-plugin.version>3.1.1</maven-shade-plugin.version>
+    <build-helper-maven-plugin.version>3.6.0</build-helper-maven-plugin.version>
     <log4j.version>1.2.17</log4j.version>
     <spark.version>3.5.3</spark.version>
+    <spark.libversion>3.5</spark.libversion>
     <scala.version>2.12.10</scala.version>
     <scala.libversion>2.12</scala.libversion>
     <hudi.version>1.1.1</hudi.version>
@@ -70,7 +72,7 @@
                 <includes>
                   <include>com.beust:jcommander</include>
                   <include>log4j:log4j</include>
-                  <include>com.github.scopt:scopt_2.12</include>
+                  <include>com.github.scopt:scopt_${scala.libversion}</include>
                 </includes>
               </artifactSet>
               <filters>
@@ -88,6 +90,26 @@
                 </filter>
               </filters>
               <finalName>${project.artifactId}-${project.version}</finalName>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <!-- Spark-line specific sources, e.g. src/main/spark3.5/scala -->
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <version>${build-helper-maven-plugin.version}</version>
+        <executions>
+          <execution>
+            <id>add-spark-source</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>add-source</goal>
+            </goals>
+            <configuration>
+              <sources>
+                <source>${project.basedir}/src/main/spark${spark.libversion}/scala</source>
+              </sources>
             </configuration>
           </execution>
         </executions>
@@ -130,6 +152,8 @@
           <configLocation>${project.basedir}/.scalafmt.conf</configLocation>
           <sourceDirectories>
             <param>${project.basedir}/src/main/scala</param>
+            <param>${project.basedir}/src/main/spark3.5/scala</param>
+            <param>${project.basedir}/src/main/spark4.1/scala</param>
           </sourceDirectories>
           <testSourceDirectories>
             <param>${project.basedir}/src/test/scala</param>
@@ -183,12 +207,12 @@
     </dependency>
     <dependency>
       <groupId>com.github.scopt</groupId>
-      <artifactId>scopt_2.12</artifactId>
+      <artifactId>scopt_${scala.libversion}</artifactId>
       <version>${scopt.version}</version>
     </dependency>
     <dependency>
       <groupId>org.apache.hudi</groupId>
-      <artifactId>hudi-spark3.5-bundle_2.12</artifactId>
+      <artifactId>hudi-spark${spark.libversion}-bundle_${scala.libversion}</artifactId>
       <version>${hudi.version}</version>
       <scope>provided</scope>
     </dependency>
@@ -200,31 +224,39 @@
     </dependency>
     <dependency>
       <groupId>org.apache.iceberg</groupId>
-      <artifactId>iceberg-spark-runtime-3.5_2.12</artifactId>
+      <artifactId>iceberg-spark-runtime-${spark.libversion}_${scala.libversion}</artifactId>
       <version>${iceberg.version}</version>
       <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.hudi</groupId>
-      <artifactId>hudi-utilities_2.12</artifactId>
+      <artifactId>hudi-utilities_${scala.libversion}</artifactId>
       <version>${hudi.version}</version>
       <scope>provided</scope>
+      <!-- The Hudi bundle supplies the classes; a locally installed non-default Hudi
+           profile publishes a pom whose transitive deps fall back to Scala 2.12 -->
+      <exclusions>
+        <exclusion>
+          <groupId>*</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
     <dependency>
       <groupId>org.apache.spark</groupId>
-      <artifactId>spark-core_2.12</artifactId>
+      <artifactId>spark-core_${scala.libversion}</artifactId>
       <version>${spark.version}</version>
       <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.spark</groupId>
-      <artifactId>spark-sql_2.12</artifactId>
+      <artifactId>spark-sql_${scala.libversion}</artifactId>
       <version>${spark.version}</version>
       <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>io.delta</groupId>
-      <artifactId>delta-spark_2.12</artifactId>
+      <artifactId>delta-spark_${scala.libversion}</artifactId>
       <version>${delta.version}</version>
       <scope>provided</scope>
     </dependency>
@@ -240,6 +272,23 @@
       <scope>test</scope>
     </dependency>
   </dependencies>
+
+  <profiles>
+    <profile>
+      <!-- Spark 4.1 / Scala 2.13 / Hudi 1.3; Spark 4 requires Java 17 -->
+      <id>spark4.1</id>
+      <properties>
+        <maven.compiler.release>17</maven.compiler.release>
+        <spark.version>4.1.1</spark.version>
+        <spark.libversion>4.1</spark.libversion>
+        <scala.version>2.13.17</scala.version>
+        <scala.libversion>2.13</scala.libversion>
+        <hudi.version>1.3.0-SNAPSHOT</hudi.version>
+        <iceberg.version>1.12.0</iceberg.version>
+        <delta.version>4.1.0</delta.version>
+      </properties>
+    </profile>
+  </profiles>
 
   <repositories>
     <repository>
