@@ -457,7 +457,11 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
       s"Generating random updates from partitions for round # $currentRound: Partitions $partitionsToUpdate")
 
     var sourceDf = spark.read.format(ChangeDataGenerator.DEFAULT_DATA_GEN_FORMAT).load(s"$path/*")
-    sourceDf = sourceDf.filter(col("partition").isin(partitionsToUpdate: _*))
+    // Partition values are derived from the current date, so they won't match data written on an
+    // earlier day. When every partition is being updated the filter is a no-op anyway; skip it.
+    if (partitionsToUpdate.size < partitionPaths.size) {
+      sourceDf = sourceDf.filter(col("partition").isin(partitionsToUpdate: _*))
+    }
     sourceDf.createOrReplaceTempView("source_df_partitions")
 
     var rankedDF = spark.sql("""
@@ -467,7 +471,9 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
     rankedDF = rankedDF.filter($"key_rank" === 1).drop(s"key_rank")
     rankedDF.persist()
     val totalRecords = rankedDF.count()
-    // Oversample by 10% to compensate for Spark's probabilistic sampling, then limit to exact count
+    // Oversample by 10% to compensate for Spark's probabilistic sampling. The caller trims to the
+    // target count with a per-partition limit (see generateUpdates); a global .limit() here would
+    // funnel every sampled row through a single task.
     val samplingRatio = Math.min(1.0, numUpdateRecords.toDouble / totalRecords.toDouble * 1.1)
     println(
       s"Picking random updates for round: # $currentRound: from total records = $totalRecords, " +
@@ -475,7 +481,6 @@ class ChangeDataGenerator(val spark: SparkSession, val numRounds: Int = 10) exte
 
     val finalDF = rankedDF
       .sample(samplingRatio)
-      .limit(numUpdateRecords.toInt)
     finalDF
   }
 
